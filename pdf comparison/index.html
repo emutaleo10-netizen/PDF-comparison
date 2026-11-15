@@ -1,0 +1,2059 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF Diff Studio</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', '"Noto Sans JP"', 'system-ui', 'sans-serif'] },
+          colors: {
+            removed: '#f43f5e',
+            added: '#3b82f6',
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- PDF.js (CDN) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(244, 63, 94, 0.16), transparent 60%),
+        radial-gradient(1000px 600px at 110% 0%, rgba(59, 130, 246, 0.18), transparent 60%),
+        radial-gradient(800px 500px at 50% 120%, rgba(139, 92, 246, 0.14), transparent 60%),
+        #0b0f1a;
+      min-height: 100vh;
+    }
+    .glass {
+      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.025));
+      border: 1px solid rgba(255,255,255,0.08);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }
+    .viewer-bg {
+      background-color: #0f1422;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+    .drop-zone { transition: all .25s cubic-bezier(.2,.8,.2,1); }
+    .drop-zone.dragover { transform: translateY(-2px) scale(1.01); }
+    .drop-zone[data-kind="old"].dragover { border-color: rgba(244,63,94,.8); box-shadow: 0 0 0 4px rgba(244,63,94,.15); }
+    .drop-zone[data-kind="new"].dragover { border-color: rgba(59,130,246,.8); box-shadow: 0 0 0 4px rgba(59,130,246,.15); }
+    .drop-zone.loaded[data-kind="old"] { border-color: rgba(244,63,94,.45); }
+    .drop-zone.loaded[data-kind="new"] { border-color: rgba(59,130,246,.45); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #f43f5e 0%, #8b5cf6 50%, #3b82f6 100%);
+      background-size: 200% 200%;
+      transition: background-position .5s ease, transform .15s ease, box-shadow .3s ease, opacity .2s;
+    }
+    .btn-primary:not(:disabled):hover { background-position: 100% 50%; box-shadow: 0 10px 30px -8px rgba(139,92,246,.6); transform: translateY(-1px); }
+    .btn-primary:not(:disabled):active { transform: translateY(0) scale(.98); }
+    .btn-primary:disabled { opacity: .35; cursor: not-allowed; filter: grayscale(.4); }
+
+    .canvas-stage {
+      position: relative;
+      margin: 0 auto;
+      display: inline-block;
+    }
+    .page-canvas {
+      display: block;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 6px;
+      box-shadow: 0 30px 60px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.06);
+      image-rendering: auto;
+      animation: fadeIn .35s ease;
+    }
+    #overlayCanvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      border-radius: 6px;
+    }
+    .picking-mode .page-canvas {
+      cursor: crosshair !important;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+    .spinner {
+      width: 44px; height: 44px; border-radius: 9999px;
+      background: conic-gradient(from 0deg, #f43f5e, #8b5cf6, #3b82f6, transparent 75%);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+              mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+      animation: spin .9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .thumb-card { transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease; }
+    .thumb-card:hover { transform: translateY(-2px); }
+    .thumb-card.active { box-shadow: 0 0 0 2px rgba(255,255,255,.35); }
+
+    input[type="range"] { accent-color: #8b5cf6; }
+
+    .float { animation: float 5s ease-in-out infinite; }
+    @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+
+    #viewport::-webkit-scrollbar, .scroll-thin::-webkit-scrollbar { width: 10px; height: 10px; }
+    #viewport::-webkit-scrollbar-thumb, .scroll-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
+    #viewport::-webkit-scrollbar-track { background: transparent; }
+
+    .toast-enter { animation: toastIn .3s ease forwards; }
+    @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+    kbd { font-family: Inter, monospace; font-size: 10px; padding: 1px 5px; border-radius: 4px; border: 1px solid rgba(255,255,255,.15); background: rgba(255,255,255,.05); }
+
+    .num-input {
+      background: rgba(0,0,0,0.3);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+      padding: 2px 6px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: #f1f5f9;
+      font-size: 12px;
+      width: 68px;
+    }
+    .num-input:focus {
+      outline: none;
+      border-color: #8b5cf6;
+    }
+  </style>
+</head>
+
+<body class="font-sans text-slate-200 antialiased">
+  <div class="mx-auto max-w-[1640px] px-4 sm:px-6 py-4 flex flex-col gap-3.5">
+
+    <!-- ============ Header ============ -->
+    <header class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="relative h-10 w-10 rounded-xl bg-gradient-to-br from-rose-500 via-violet-500 to-blue-500 grid place-items-center shadow-lg shadow-violet-500/30">
+          <svg class="h-5 w-5 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 7h8M8 12h5m-5 5h8M5 3h10l4 4v14H5z"/></svg>
+        </div>
+        <h1 class="text-lg sm:text-xl font-extrabold tracking-tight text-white">PDF Diff <span class="bg-gradient-to-r from-rose-400 via-violet-400 to-blue-400 bg-clip-text text-transparent">Studio</span></h1>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 text-xs">
+        <span class="inline-flex items-center gap-1.5 rounded-full glass px-3 py-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-rose-500"></span>削除</span>
+        <span class="inline-flex items-center gap-1.5 rounded-full glass px-3 py-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-500"></span>追加</span>
+        <span class="inline-flex items-center gap-1.5 rounded-full glass px-3 py-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-slate-300"></span>共通</span>
+      </div>
+    </header>
+
+    <!-- ============ Control Panel ============ -->
+    <section class="glass rounded-2xl p-3.5" aria-label="コントロールパネル">
+      <div class="grid gap-3 lg:grid-cols-[1fr_auto_1fr_auto_auto] items-stretch">
+
+        <!-- Old PDF -->
+        <div id="oldDrop" data-kind="old" class="drop-zone group cursor-pointer rounded-xl border border-dashed border-white/15 bg-white/[0.03] hover:bg-white/[0.06] px-4 py-2.5 flex items-center gap-3 min-w-0">
+          <input id="oldFile" type="file" accept="application/pdf,.pdf" class="sr-only" />
+          <div class="shrink-0 h-10 w-10 rounded-lg bg-rose-500/15 text-rose-400 grid place-items-center ring-1 ring-rose-500/30 group-hover:scale-105 transition">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-[10px] font-semibold uppercase tracking-[0.15em] text-rose-300/90">旧版 PDF</p>
+              <button id="oldPathBtn" type="button" title="ファイルパスを直接入力して開く" class="hidden text-[10px] px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/30 text-rose-200 ring-1 ring-rose-500/30 transition">パス入力</button>
+            </div>
+            <p id="oldName" class="truncate text-sm font-medium text-white">クリックまたはドロップ</p>
+            <p id="oldMeta" class="text-xs text-slate-400 truncate">未選択</p>
+          </div>
+        </div>
+
+        <!-- Swap -->
+        <button id="swapBtn" type="button" title="旧版と新版を入れ替え" class="hidden lg:grid self-center h-9 w-9 place-items-center rounded-full glass hover:bg-white/10 text-slate-300 hover:text-white transition hover:rotate-180 duration-500">
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/></svg>
+        </button>
+
+        <!-- New PDF -->
+        <div id="newDrop" data-kind="new" class="drop-zone group cursor-pointer rounded-xl border border-dashed border-white/15 bg-white/[0.03] hover:bg-white/[0.06] px-4 py-2.5 flex items-center gap-3 min-w-0">
+          <input id="newFile" type="file" accept="application/pdf,.pdf" class="sr-only" />
+          <div class="shrink-0 h-10 w-10 rounded-lg bg-blue-500/15 text-blue-400 grid place-items-center ring-1 ring-blue-500/30 group-hover:scale-105 transition">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-[10px] font-semibold uppercase tracking-[0.15em] text-blue-300/90">新版 PDF</p>
+              <button id="newPathBtn" type="button" title="ファイルパスを直接入力して開く" class="hidden text-[10px] px-2 py-0.5 rounded bg-blue-500/15 hover:bg-blue-500/30 text-blue-200 ring-1 ring-blue-500/30 transition">パス入力</button>
+            </div>
+            <p id="newName" class="truncate text-sm font-medium text-white">クリックまたはドロップ</p>
+            <p id="newMeta" class="text-xs text-slate-400 truncate">未選択</p>
+          </div>
+        </div>
+
+        <!-- Compare -->
+        <button id="compareBtn" type="button" disabled class="btn-primary rounded-xl px-6 py-3 font-semibold text-white flex items-center justify-center gap-2 whitespace-nowrap">
+          <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"/></svg>
+          比較実行
+        </button>
+
+        <!-- Pager -->
+        <div class="flex items-center justify-center gap-1 rounded-xl bg-black/20 ring-1 ring-white/10 p-1">
+          <button id="prevBtn" type="button" disabled class="h-10 px-3 rounded-lg flex items-center gap-1 text-sm font-medium hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>前へ
+          </button>
+          <div class="min-w-[86px] text-center">
+            <div id="pageInfo" class="text-lg font-bold tabular-nums text-white leading-none">– / –</div>
+            <div class="text-[10px] text-slate-500 mt-1">ページ</div>
+          </div>
+          <button id="nextBtn" type="button" disabled class="h-10 px-3 rounded-lg flex items-center gap-1 text-sm font-medium hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent transition">
+            次へ<svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Options row -->
+      <div class="mt-3 pt-3 border-t border-white/5 flex flex-wrap items-center gap-x-6 gap-y-2.5 text-sm">
+        <label class="flex items-center gap-2">
+          <span class="text-slate-400 text-xs">解像度</span>
+          <select id="scaleSelect" class="bg-slate-900 ring-1 ring-white/15 rounded-lg px-2.5 py-1 text-xs text-slate-100 focus:outline-none focus:ring-violet-500">
+            <option value="1">1.0x（高速）</option>
+            <option value="1.5">1.5x</option>
+            <option value="2" selected>2.0x（標準）</option>
+            <option value="3">3.0x（高精細）</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-2">
+          <span class="text-slate-400 text-xs whitespace-nowrap">描画判定しきい値</span>
+          <input id="thresholdRange" type="range" min="50" max="254" value="200" class="w-28" />
+          <span id="thresholdValue" class="tabular-nums text-xs w-8 text-slate-300">200</span>
+        </label>
+        <label class="flex items-center gap-2 cursor-pointer select-none">
+          <input id="commonToggle" type="checkbox" checked class="peer sr-only" />
+          <span class="relative h-5 w-9 rounded-full bg-white/10 peer-checked:bg-violet-500 transition after:absolute after:top-0.5 after:left-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition peer-checked:after:translate-x-4"></span>
+          <span class="text-slate-400 text-xs">共通部分をグレー表示</span>
+        </label>
+        <label class="flex items-center gap-2 cursor-pointer select-none">
+          <input id="autoAlignToggle" type="checkbox" class="peer sr-only" />
+          <span class="relative h-5 w-9 rounded-full bg-white/10 peer-checked:bg-emerald-500 transition after:absolute after:top-0.5 after:left-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:transition peer-checked:after:translate-x-4"></span>
+          <span class="text-slate-300 text-xs font-medium">比較時に自動で位置・傾きを補正</span>
+        </label>
+        <div class="ml-auto hidden xl:flex items-center gap-3 text-[11px] text-slate-500">
+          <span><kbd>←</kbd> <kbd>→</kbd> ページ移動</span>
+          <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 表示切替</span>
+          <span><kbd>A</kbd> 自動補正</span>
+          <span><kbd>+</kbd><kbd>-</kbd> ズーム</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Main ============ -->
+    <main class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_350px]">
+
+      <!-- Viewer -->
+      <section class="glass rounded-2xl overflow-hidden flex flex-col" aria-label="比較ビューア">
+        <div class="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-white/5">
+          <div role="tablist" class="flex items-center gap-1 rounded-xl bg-black/25 p-1 ring-1 ring-white/5">
+            <button id="tabDiff" role="tab" data-tab="diff" class="tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition">差分</button>
+            <button id="tabOld" role="tab" data-tab="old" class="tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition">旧版</button>
+            <button id="tabNew" role="tab" data-tab="new" class="tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition">新版</button>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span id="alignActiveBadge" class="hidden rounded-full px-2.5 py-1 text-[11px] font-medium bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/30"></span>
+            <span id="diffBadge" class="hidden rounded-full px-2.5 py-1 text-xs font-semibold"></span>
+            <div class="flex items-center rounded-xl bg-black/25 ring-1 ring-white/5 p-1">
+              <button id="zoomOut" title="縮小" class="h-8 w-8 grid place-items-center rounded-lg hover:bg-white/10 transition">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M5 12h14"/></svg>
+              </button>
+              <span id="zoomLabel" class="w-14 text-center text-xs tabular-nums text-slate-300">幅合わせ</span>
+              <button id="zoomIn" title="拡大" class="h-8 w-8 grid place-items-center rounded-lg hover:bg-white/10 transition">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 5v14M5 12h14"/></svg>
+              </button>
+              <button id="zoomFit" title="幅に合わせる" class="h-8 px-2 rounded-lg hover:bg-white/10 text-xs transition">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></svg>
+              </button>
+            </div>
+            <button id="downloadBtn" title="表示中の画像をPNG保存" disabled class="h-9 px-3 rounded-xl bg-black/25 ring-1 ring-white/5 hover:bg-white/10 disabled:opacity-30 text-xs flex items-center gap-1.5 transition">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0l-4-4m4 4l4-4M4 20h16"/></svg>PNG
+            </button>
+          </div>
+        </div>
+
+        <!-- 2-Point Alignment Interactive Banner -->
+        <div id="pickBanner" class="hidden px-4 py-2.5 text-xs bg-violet-600/20 text-violet-100 border-b border-violet-500/30 flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <span class="inline-block h-2.5 w-2.5 rounded-full bg-violet-400 animate-ping"></span>
+            <span id="pickBannerText" class="font-medium">2点指定補正モード</span>
+          </div>
+          <button id="pickCancelBtn" type="button" class="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs transition">キャンセル (Esc)</button>
+        </div>
+
+        <div id="pageNotice" class="hidden px-4 py-2 text-xs bg-amber-500/10 text-amber-300 border-b border-amber-500/20"></div>
+
+        <div class="relative flex-1">
+          <div id="viewport" class="viewer-bg overflow-auto p-6 h-[calc(100vh-250px)] min-h-[500px] text-center">
+            <!-- Empty state -->
+            <div id="emptyState" class="h-full grid place-items-center text-center">
+              <div class="max-w-md">
+                <div class="float mx-auto mb-6 relative h-32 w-44">
+                  <div class="absolute left-0 top-2 h-28 w-20 rounded-lg bg-white/90 shadow-xl -rotate-6 p-2 space-y-1.5">
+                    <div class="h-1.5 w-12 rounded bg-slate-300"></div><div class="h-1.5 w-14 rounded bg-rose-400"></div><div class="h-1.5 w-10 rounded bg-slate-300"></div><div class="h-1.5 w-14 rounded bg-slate-300"></div><div class="h-1.5 w-8 rounded bg-rose-400"></div>
+                  </div>
+                  <div class="absolute right-0 top-0 h-28 w-20 rounded-lg bg-white shadow-2xl rotate-6 p-2 space-y-1.5">
+                    <div class="h-1.5 w-12 rounded bg-slate-300"></div><div class="h-1.5 w-11 rounded bg-blue-500"></div><div class="h-1.5 w-10 rounded bg-slate-300"></div><div class="h-1.5 w-14 rounded bg-slate-300"></div><div class="h-1.5 w-12 rounded bg-blue-500"></div>
+                  </div>
+                </div>
+                <h2 class="text-xl font-bold text-white">2つのPDFを比較しましょう</h2>
+                <p class="mt-2 text-sm text-slate-400 leading-relaxed">上部で <span class="text-rose-300 font-medium">旧版</span> と <span class="text-blue-300 font-medium">新版</span> のPDFを選択（またはドロップ）し、<br>「比較実行」を押してください。</p>
+              </div>
+            </div>
+
+            <!-- Canvases container -->
+            <div id="canvasStage" class="canvas-stage hidden">
+              <canvas id="diffCanvas" class="page-canvas hidden" aria-label="差分画像"></canvas>
+              <canvas id="oldCanvas" class="page-canvas hidden" aria-label="旧版画像"></canvas>
+              <canvas id="newCanvas" class="page-canvas hidden" aria-label="新版画像"></canvas>
+              <canvas id="overlayCanvas" class="hidden"></canvas>
+            </div>
+          </div>
+
+          <!-- Loading -->
+          <div id="loadingOverlay" class="hidden absolute inset-0 bg-[#0b0f1a]/70 backdrop-blur-sm grid place-items-center z-20">
+            <div class="flex flex-col items-center gap-3 max-w-sm text-center px-6">
+              <div class="spinner"></div>
+              <p id="loadingText" class="text-sm font-medium text-slate-200">レンダリング中…</p>
+              <p id="loadingSubText" class="text-xs text-slate-400"></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sidebar -->
+      <aside class="flex flex-col gap-3.5" aria-label="サイドパネル">
+        <!-- Stats -->
+        <section class="glass rounded-2xl p-4">
+          <h3 class="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400 mb-2.5">ページ統計</h3>
+          <div class="flex items-end justify-between mb-2.5">
+            <div>
+              <div id="statRate" class="text-3xl font-extrabold tabular-nums text-white">–</div>
+              <div class="text-xs text-slate-500">変更率（描画ピクセル比）</div>
+            </div>
+            <div id="statSize" class="text-right text-[11px] text-slate-500 tabular-nums"></div>
+          </div>
+          <div class="h-2 w-full rounded-full bg-white/5 overflow-hidden flex mb-3.5">
+            <div id="barRemoved" class="h-full bg-rose-500 transition-all duration-300" style="width:0%"></div>
+            <div id="barAdded" class="h-full bg-blue-500 transition-all duration-300" style="width:0%"></div>
+            <div id="barCommon" class="h-full bg-slate-400/60 transition-all duration-300" style="width:0%"></div>
+          </div>
+          <dl class="space-y-1.5 text-xs">
+            <div class="flex items-center justify-between"><dt class="flex items-center gap-2"><span class="h-2.5 w-2.5 rounded-sm bg-rose-500"></span>削除</dt><dd id="statRemoved" class="tabular-nums font-semibold text-rose-300">–</dd></div>
+            <div class="flex items-center justify-between"><dt class="flex items-center gap-2"><span class="h-2.5 w-2.5 rounded-sm bg-blue-500"></span>追加</dt><dd id="statAdded" class="tabular-nums font-semibold text-blue-300">–</dd></div>
+            <div class="flex items-center justify-between"><dt class="flex items-center gap-2"><span class="h-2.5 w-2.5 rounded-sm bg-slate-300"></span>共通</dt><dd id="statCommon" class="tabular-nums font-semibold text-slate-300">–</dd></div>
+          </dl>
+        </section>
+
+        <!-- Alignment / Tilt / Scale Correction Panel -->
+        <section class="glass rounded-2xl p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-xs font-semibold uppercase tracking-[0.15em] text-slate-300 flex items-center gap-1.5">
+              <svg class="h-4 w-4 text-violet-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>
+              ズレ・傾き・縮尺補正
+            </h3>
+            <button id="alignResetBtn" type="button" disabled class="text-[11px] px-2 py-0.5 rounded bg-white/5 hover:bg-white/10 disabled:opacity-30 text-slate-300 transition">リセット</button>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2 mb-3.5">
+            <button id="autoAlignBtn" type="button" disabled class="rounded-xl bg-gradient-to-r from-violet-600/80 to-indigo-600/80 hover:from-violet-500 hover:to-indigo-500 disabled:opacity-30 py-2 px-3 text-xs font-semibold text-white shadow flex items-center justify-center gap-1.5 transition">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              自動補正を実行
+            </button>
+            <button id="pick2PtBtn" type="button" disabled class="rounded-xl bg-white/5 hover:bg-white/10 ring-1 ring-white/15 disabled:opacity-30 py-2 px-3 text-xs font-semibold text-slate-200 flex items-center justify-center gap-1.5 transition">
+              <svg class="h-4 w-4 text-violet-300" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5"/></svg>
+              2点指定で補正
+            </button>
+          </div>
+
+          <div class="space-y-2.5 text-xs border-t border-white/5 pt-3">
+            <!-- X Offset -->
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-slate-400">水平ズレ X (px)</span>
+                <div class="flex items-center gap-1">
+                  <button type="button" data-nudge="dx" data-step="-0.5" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">-</button>
+                  <input id="alignDxInput" type="number" step="0.5" value="0" class="num-input" />
+                  <button type="button" data-nudge="dx" data-step="0.5" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">+</button>
+                </div>
+              </div>
+              <input id="alignDxRange" type="range" min="-300" max="300" step="0.5" value="0" class="w-full h-1.5" />
+            </div>
+
+            <!-- Y Offset -->
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-slate-400">垂直ズレ Y (px)</span>
+                <div class="flex items-center gap-1">
+                  <button type="button" data-nudge="dy" data-step="-0.5" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">-</button>
+                  <input id="alignDyInput" type="number" step="0.5" value="0" class="num-input" />
+                  <button type="button" data-nudge="dy" data-step="0.5" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">+</button>
+                </div>
+              </div>
+              <input id="alignDyRange" type="range" min="-300" max="300" step="0.5" value="0" class="w-full h-1.5" />
+            </div>
+
+            <!-- Rotation Angle -->
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-slate-400">傾き回転 (°)</span>
+                <div class="flex items-center gap-1">
+                  <button type="button" data-nudge="angle" data-step="-0.05" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">-</button>
+                  <input id="alignAngleInput" type="number" step="0.05" value="0" class="num-input" />
+                  <button type="button" data-nudge="angle" data-step="0.05" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">+</button>
+                </div>
+              </div>
+              <input id="alignAngleRange" type="range" min="-15" max="15" step="0.02" value="0" class="w-full h-1.5" />
+            </div>
+
+            <!-- Scale -->
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-slate-400">縮尺 (%)</span>
+                <div class="flex items-center gap-1">
+                  <button type="button" data-nudge="scalePct" data-step="-0.1" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">-</button>
+                  <input id="alignScaleInput" type="number" step="0.1" value="100" class="num-input" />
+                  <button type="button" data-nudge="scalePct" data-step="0.1" class="nudge-btn h-5 w-5 rounded bg-white/5 hover:bg-white/15 grid place-items-center text-slate-300">+</button>
+                </div>
+              </div>
+              <input id="alignScaleRange" type="range" min="50" max="150" step="0.05" value="100" class="w-full h-1.5" />
+            </div>
+          </div>
+        </section>
+
+        <!-- Thumbnails -->
+        <section class="glass rounded-2xl p-4">
+          <h3 class="text-xs font-semibold uppercase tracking-[0.15em] text-slate-400 mb-2.5">元画像</h3>
+          <div class="grid grid-cols-2 gap-3">
+            <button id="thumbOldBtn" data-tab="old" class="thumb-card text-left rounded-xl bg-black/25 ring-1 ring-rose-500/25 p-2">
+              <div class="aspect-[1/1.414] rounded-md bg-white/5 grid place-items-center overflow-hidden">
+                <canvas id="thumbOld" class="w-full h-auto hidden rounded"></canvas>
+                <span id="thumbOldEmpty" class="text-[10px] text-slate-600">なし</span>
+              </div>
+              <div class="mt-1.5 text-[11px] font-semibold text-rose-300">旧版</div>
+            </button>
+            <button id="thumbNewBtn" data-tab="new" class="thumb-card text-left rounded-xl bg-black/25 ring-1 ring-blue-500/25 p-2">
+              <div class="aspect-[1/1.414] rounded-md bg-white/5 grid place-items-center overflow-hidden">
+                <canvas id="thumbNew" class="w-full h-auto hidden rounded"></canvas>
+                <span id="thumbNewEmpty" class="text-[10px] text-slate-600">なし</span>
+              </div>
+              <div class="mt-1.5 text-[11px] font-semibold text-blue-300">新版</div>
+            </button>
+          </div>
+          <button id="thumbDiffBtn" data-tab="diff" class="thumb-card mt-2.5 w-full rounded-xl bg-black/25 ring-1 ring-violet-500/25 py-2 text-xs font-semibold text-violet-300 hover:bg-white/5">差分を表示</button>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Path Input Modal -->
+  <div id="pathModal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm grid place-items-center p-4">
+    <div class="glass rounded-2xl max-w-lg w-full p-5 shadow-2xl border border-white/15">
+      <h3 id="pathModalTitle" class="text-base font-bold text-white mb-1">ファイルパスを指定</h3>
+      <p class="text-xs text-slate-400 mb-3">サーバーまたはローカルのファイルパスを入力してください。</p>
+      <input id="pathModalInput" type="text" placeholder="例: \\server\share\folder\drawing_v1.pdf" class="w-full rounded-xl bg-black/40 border border-white/15 px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-violet-500 mb-4" />
+      <div class="flex justify-end gap-2">
+        <button id="pathModalCancel" type="button" class="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-medium text-slate-300">キャンセル</button>
+        <button id="pathModalSubmit" type="button" class="btn-primary px-5 py-2 rounded-xl text-xs font-semibold text-white">開く</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 rounded-xl px-4 py-3 text-sm shadow-2xl ring-1"></div>
+
+  <script>
+  (() => {
+    'use strict';
+
+    /* ---------- PDF.js setup ---------- */
+    const PDFJS_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+    if (!window.pdfjsLib) {
+      alert('PDF.js の読み込みに失敗しました。ネットワーク接続を確認してください。');
+      return;
+    }
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + 'pdf.worker.min.js';
+
+    /* ---------- Constants ---------- */
+    const COLOR = {
+      removed: [244, 63, 94],   // 赤：旧版のみ
+      added:   [37, 99, 235],   // 青：新版のみ
+      common:  [208, 212, 220], // 薄いグレー：共通
+      bg:      [255, 255, 255], // 白：背景
+    };
+    const ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+
+    /* ---------- State ---------- */
+    const state = {
+      backend: { available: false, dataclasysAvailable: false, clsuPath: '' },
+      old: { doc: null, name: '', size: 0, mode: '', serverPath: '' },
+      new: { doc: null, name: '', size: 0, mode: '', serverPath: '' },
+      page: 1,
+      total: 0,
+      scale: 2,
+      renderedScale: 2,
+      threshold: 200,
+      showCommon: true,
+      autoAlignOnCompare: false,
+      tab: 'diff',
+      zoom: 'fit',
+      compared: false,
+      seq: 0,
+      missing: { old: false, new: false },
+      rawOldCanvas: null,
+      rawNewCanvas: null,
+      align: { dx: 0, dy: 0, angle: 0, scale: 1 },
+      pageAlignments: {},
+      picking: {
+        active: false,
+        step: 0,
+        oldPt1: null,
+        oldPt2: null,
+        newPt1: null,
+        newPt2: null,
+      },
+      pathModalKind: 'old',
+    };
+
+    /* ---------- DOM ---------- */
+    const $ = (id) => document.getElementById(id);
+    const el = {
+      oldFile: $('oldFile'), newFile: $('newFile'),
+      oldDrop: $('oldDrop'), newDrop: $('newDrop'),
+      oldName: $('oldName'), newName: $('newName'),
+      oldMeta: $('oldMeta'), newMeta: $('newMeta'),
+      oldPathBtn: $('oldPathBtn'), newPathBtn: $('newPathBtn'),
+      compareBtn: $('compareBtn'), swapBtn: $('swapBtn'),
+      prevBtn: $('prevBtn'), nextBtn: $('nextBtn'), pageInfo: $('pageInfo'),
+      scaleSelect: $('scaleSelect'), thresholdRange: $('thresholdRange'), thresholdValue: $('thresholdValue'),
+      commonToggle: $('commonToggle'), autoAlignToggle: $('autoAlignToggle'),
+      zoomIn: $('zoomIn'), zoomOut: $('zoomOut'), zoomFit: $('zoomFit'), zoomLabel: $('zoomLabel'),
+      downloadBtn: $('downloadBtn'),
+      viewport: $('viewport'), emptyState: $('emptyState'),
+      canvasStage: $('canvasStage'),
+      diffCanvas: $('diffCanvas'), oldCanvas: $('oldCanvas'), newCanvas: $('newCanvas'),
+      overlayCanvas: $('overlayCanvas'),
+      thumbOld: $('thumbOld'), thumbNew: $('thumbNew'),
+      thumbOldEmpty: $('thumbOldEmpty'), thumbNewEmpty: $('thumbNewEmpty'),
+      loadingOverlay: $('loadingOverlay'), loadingText: $('loadingText'), loadingSubText: $('loadingSubText'),
+      pageNotice: $('pageNotice'), diffBadge: $('diffBadge'), alignActiveBadge: $('alignActiveBadge'),
+      pickBanner: $('pickBanner'), pickBannerText: $('pickBannerText'), pickCancelBtn: $('pickCancelBtn'),
+      statRate: $('statRate'), statRemoved: $('statRemoved'), statAdded: $('statAdded'), statCommon: $('statCommon'), statSize: $('statSize'),
+      barRemoved: $('barRemoved'), barAdded: $('barAdded'), barCommon: $('barCommon'),
+      autoAlignBtn: $('autoAlignBtn'), pick2PtBtn: $('pick2PtBtn'), alignResetBtn: $('alignResetBtn'),
+      alignDxInput: $('alignDxInput'), alignDxRange: $('alignDxRange'),
+      alignDyInput: $('alignDyInput'), alignDyRange: $('alignDyRange'),
+      alignAngleInput: $('alignAngleInput'), alignAngleRange: $('alignAngleRange'),
+      alignScaleInput: $('alignScaleInput'), alignScaleRange: $('alignScaleRange'),
+      pathModal: $('pathModal'), pathModalTitle: $('pathModalTitle'), pathModalInput: $('pathModalInput'),
+      pathModalCancel: $('pathModalCancel'), pathModalSubmit: $('pathModalSubmit'),
+      toast: $('toast'),
+    };
+    const canvases = { diff: el.diffCanvas, old: el.oldCanvas, new: el.newCanvas };
+
+    /* ---------- Utils ---------- */
+    let toastTimer = null;
+    function toast(msg, type = 'info') {
+      const styles = {
+        info: 'bg-slate-900/95 text-slate-100 ring-white/10',
+        error: 'bg-rose-950/95 text-rose-100 ring-rose-500/40',
+        success: 'bg-emerald-950/95 text-emerald-100 ring-emerald-500/40',
+      };
+      el.toast.className = `fixed bottom-6 left-1/2 z-50 rounded-xl px-4 py-3 text-sm shadow-2xl ring-1 toast-enter ${styles[type]}`;
+      el.toast.textContent = msg;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.toast.classList.add('hidden'), 3800);
+    }
+    const fmt = (n) => n.toLocaleString('ja-JP');
+    function showLoading(on, text = 'レンダリング中…', subText = '') {
+      el.loadingText.textContent = text;
+      el.loadingSubText.textContent = subText;
+      el.loadingOverlay.classList.toggle('hidden', !on);
+    }
+
+    /* ---------- Desktop Backend Integration ---------- */
+    let progressPollTimer = null;
+    function startProgressPolling() {
+      stopProgressPolling();
+      progressPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch('/api/progress', { cache: 'no-store' });
+          if (!res.ok) return;
+          const ev = await res.json();
+          if (ev && ev.stage) {
+            const pct = ev.percent != null ? ` (${Math.round(ev.percent * 100)}%)` : '';
+            el.loadingSubText.textContent = `[${ev.stage}]${pct} ${ev.message || ''}`;
+          }
+        } catch (_) {}
+      }, 250);
+    }
+    function stopProgressPolling() {
+      if (progressPollTimer) {
+        clearInterval(progressPollTimer);
+        progressPollTimer = null;
+      }
+    }
+
+    async function checkBackendStatus() {
+      try {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        state.backend.available = true;
+        state.backend.dataclasysAvailable = !!data.dataclasys_available;
+        state.backend.clsuPath = data.clsu_client_path || '';
+        el.oldPathBtn.classList.remove('hidden');
+        el.newPathBtn.classList.remove('hidden');
+        setInterval(() => {
+          fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
+        }, 4000);
+        window.addEventListener('pagehide', () => {
+          if (navigator.sendBeacon) navigator.sendBeacon('/api/shutdown', '');
+        });
+      } catch (_) {
+        state.backend.available = false;
+      }
+    }
+    checkBackendStatus();
+
+    function base64ToUint8Array(b64) {
+      const bin = atob(b64);
+      const len = bin.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    function looksLikePlainPdfBytes(u8) {
+      if (!u8 || u8.length < 5) return false;
+      return u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46 && u8[4] === 0x2D;
+    }
+
+    async function loadPdfFromBytes(kind, u8Array, fileName, fileSize, modeLabel, serverPath = '') {
+      const slot = state[kind];
+      const metaEl = el[kind + 'Meta'];
+      metaEl.textContent = '読み込み中…';
+      try {
+        const doc = await pdfjsLib.getDocument({
+          data: u8Array,
+          cMapUrl: PDFJS_BASE + 'cmaps/',
+          cMapPacked: true,
+          standardFontDataUrl: PDFJS_BASE + 'standard_fonts/',
+        }).promise;
+        if (slot.doc) slot.doc.destroy();
+        slot.doc = doc;
+        slot.name = fileName;
+        slot.size = fileSize || u8Array.byteLength;
+        slot.mode = modeLabel || 'local';
+        slot.serverPath = serverPath || fileName;
+        updateFileLabels();
+        state.compared = false;
+        state.pageAlignments = {};
+        resetAlignParams(false);
+        updateControls();
+        toast(`${kind === 'old' ? '旧版' : '新版'}を読み込みました（${doc.numPages} ページ）`, 'success');
+      } catch (err) {
+        console.error(err);
+        metaEl.textContent = '読み込みエラー';
+        toast('PDFの読み込みに失敗しました: ' + (err.message || err), 'error');
+      }
+    }
+
+    async function selectFileViaBackend(kind) {
+      showLoading(true, `${kind === 'old' ? '旧版' : '新版'}PDFを選択中…`, '');
+      startProgressPolling();
+      try {
+        const res = await fetch(`/api/select-file?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
+        const data = await res.json();
+        if (data.cancelled) {
+          showLoading(false);
+          return;
+        }
+        if (!res.ok || data.error) {
+          throw new Error(data.error || 'ファイルの読み込みに失敗しました');
+        }
+        const bytes = base64ToUint8Array(data.pdf_base64);
+        await loadPdfFromBytes(kind, bytes, data.file_name, data.file_size, data.workspace_mode, data.server_path);
+      } catch (err) {
+        console.error(err);
+        toast(err.message || String(err), 'error');
+      } finally {
+        stopProgressPolling();
+        showLoading(false);
+      }
+    }
+
+    async function openServerPathViaBackend(kind, serverPath) {
+      if (!serverPath || !serverPath.trim()) return;
+      showLoading(true, 'ファイルを読み込み中…', serverPath);
+      startProgressPolling();
+      try {
+        const res = await fetch('/api/open-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, path: serverPath.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || '指定パスのオープンに失敗しました');
+        }
+        const bytes = base64ToUint8Array(data.pdf_base64);
+        await loadPdfFromBytes(kind, bytes, data.file_name, data.file_size, data.workspace_mode, data.server_path);
+      } catch (err) {
+        console.error(err);
+        toast(err.message || String(err), 'error');
+      } finally {
+        stopProgressPolling();
+        showLoading(false);
+      }
+    }
+
+    async function loadPdfFileObject(kind, file) {
+      if (!file) return;
+      if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+        toast('PDFファイルを選択してください。', 'error');
+        return;
+      }
+      const rawBuf = new Uint8Array(await file.arrayBuffer());
+      const isPlain = looksLikePlainPdfBytes(rawBuf);
+
+      if (!isPlain && state.backend.available) {
+        showLoading(true, 'ファイルを読み込み中…', file.name);
+        startProgressPolling();
+        try {
+          const res = await fetch(`/api/decrypt-dropped?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(file.name)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: rawBuf,
+          });
+          const data = await res.json();
+          if (!res.ok || data.error) {
+            throw new Error(data.error || 'ファイルの復号に失敗しました');
+          }
+          const decBytes = base64ToUint8Array(data.pdf_base64);
+          await loadPdfFromBytes(kind, decBytes, file.name, decBytes.byteLength, data.workspace_mode || 'dataclasys', file.name);
+        } catch (err) {
+          console.error(err);
+          toast('読み込みエラー: ' + (err.message || err), 'error');
+        } finally {
+          stopProgressPolling();
+          showLoading(false);
+        }
+        return;
+      }
+
+      await loadPdfFromBytes(kind, rawBuf, file.name, file.size, isPlain ? 'direct' : 'local', file.name);
+    }
+
+    function updateFileLabels() {
+      for (const kind of ['old', 'new']) {
+        const s = state[kind];
+        el[kind + 'Name'].textContent = s.doc ? s.name : 'クリックまたはドロップ';
+        el[kind + 'Name'].title = s.doc ? (s.serverPath || s.name) : '';
+        el[kind + 'Meta'].textContent = s.doc
+          ? `${s.doc.numPages} ページ · ${(s.size / 1024 / 1024).toFixed(2)} MB`
+          : '未選択';
+        el[kind + 'Drop'].classList.toggle('loaded', !!s.doc);
+      }
+    }
+
+    function setupDropZone(kind) {
+      const zone = el[kind + 'Drop'];
+      const input = el[kind + 'File'];
+      const pathBtn = el[kind + 'PathBtn'];
+
+      zone.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        if (state.backend.available) {
+          selectFileViaBackend(kind);
+        } else {
+          input.click();
+        }
+      });
+
+      pathBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.pathModalKind = kind;
+        el.pathModalTitle.textContent = `${kind === 'old' ? '旧版' : '新版'}PDFのファイルパスを指定`;
+        el.pathModalInput.value = state[kind].serverPath || '';
+        el.pathModal.classList.remove('hidden');
+        setTimeout(() => el.pathModalInput.focus(), 50);
+      });
+
+      input.addEventListener('change', () => {
+        if (input.files[0]) loadPdfFileObject(kind, input.files[0]);
+        input.value = '';
+      });
+
+      ['dragenter', 'dragover'].forEach((ev) => zone.addEventListener(ev, (e) => {
+        e.preventDefault(); e.stopPropagation(); zone.classList.add('dragover');
+      }));
+      ['dragleave', 'drop'].forEach((ev) => zone.addEventListener(ev, (e) => {
+        e.preventDefault(); e.stopPropagation(); zone.classList.remove('dragover');
+      }));
+      zone.addEventListener('drop', (e) => {
+        const f = e.dataTransfer.files[0];
+        if (f) loadPdfFileObject(kind, f);
+      });
+    }
+    setupDropZone('old');
+    setupDropZone('new');
+
+    el.pathModalCancel.addEventListener('click', () => el.pathModal.classList.add('hidden'));
+    el.pathModalSubmit.addEventListener('click', () => {
+      const p = el.pathModalInput.value.trim();
+      el.pathModal.classList.add('hidden');
+      if (p) openServerPathViaBackend(state.pathModalKind, p);
+    });
+    el.pathModalInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') el.pathModalSubmit.click();
+      if (e.key === 'Escape') el.pathModal.classList.add('hidden');
+    });
+
+    ['dragover', 'drop'].forEach((ev) => window.addEventListener(ev, (e) => e.preventDefault()));
+    el.viewport.addEventListener('drop', async (e) => {
+      const files = [...e.dataTransfer.files].filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+      if (!files.length) return;
+      if (files.length >= 2) {
+        await loadPdfFileObject('old', files[0]);
+        await loadPdfFileObject('new', files[1]);
+      } else {
+        await loadPdfFileObject(!state.old.doc ? 'old' : 'new', files[0]);
+      }
+    });
+
+    el.swapBtn.addEventListener('click', () => {
+      [state.old, state.new] = [state.new, state.old];
+      state.pageAlignments = {};
+      resetAlignParams(false);
+      updateFileLabels();
+      updateControls();
+      if (state.compared) renderCurrent();
+    });
+
+    /* ---------- Rendering & Transformation ---------- */
+    async function renderPage(doc, pageNum, scale) {
+      if (!doc || pageNum > doc.numPages) return null;
+      const page = await doc.getPage(pageNum);
+      const vp = page.getViewport({ scale });
+      const c = document.createElement('canvas');
+      c.width = Math.ceil(vp.width);
+      c.height = Math.ceil(vp.height);
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      page.cleanup();
+      return c;
+    }
+
+    function createPaddedCanvas(src, W, H) {
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, W, H);
+      if (src) ctx.drawImage(src, 0, 0);
+      return c;
+    }
+
+    function applyAlignmentToNewCanvas(showUnwarpedForPicking = false) {
+      if (!state.rawOldCanvas || !state.rawNewCanvas) return;
+      const W = state.rawOldCanvas.width;
+      const H = state.rawOldCanvas.height;
+      el.newCanvas.width = W;
+      el.newCanvas.height = H;
+      const ctx = el.newCanvas.getContext('2d', { willReadFrequently: true });
+      ctx.save();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, W, H);
+
+      if (!showUnwarpedForPicking) {
+        const { dx, dy, angle, scale } = state.align;
+        const cx = W * 0.5;
+        const cy = H * 0.5;
+        const rad = (angle * Math.PI) / 180;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.translate(cx + dx, cy + dy);
+        ctx.rotate(rad);
+        ctx.scale(scale, scale);
+        ctx.translate(-cx, -cy);
+      }
+      ctx.drawImage(state.rawNewCanvas, 0, 0);
+      ctx.restore();
+      updateAlignBadge();
+    }
+
+    function isAlignIdentity() {
+      const { dx, dy, angle, scale } = state.align;
+      return Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05 && Math.abs(angle) < 0.005 && Math.abs(scale - 1) < 0.0005;
+    }
+
+    function updateAlignBadge() {
+      if (!state.compared || isAlignIdentity()) {
+        el.alignActiveBadge.classList.add('hidden');
+        return;
+      }
+      const { dx, dy, angle, scale } = state.align;
+      el.alignActiveBadge.classList.remove('hidden');
+      el.alignActiveBadge.textContent = `補正中: X=${dx.toFixed(1)}px Y=${dy.toFixed(1)}px θ=${angle.toFixed(2)}° 縮尺=${(scale * 100).toFixed(1)}%`;
+    }
+
+    function syncAlignInputsFromState() {
+      const { dx, dy, angle, scale } = state.align;
+      el.alignDxInput.value = Number(dx.toFixed(2));
+      el.alignDxRange.value = Math.max(-300, Math.min(300, dx));
+      el.alignDyInput.value = Number(dy.toFixed(2));
+      el.alignDyRange.value = Math.max(-300, Math.min(300, dy));
+      el.alignAngleInput.value = Number(angle.toFixed(2));
+      el.alignAngleRange.value = Math.max(-15, Math.min(15, angle));
+      const scalePct = scale * 100;
+      el.alignScaleInput.value = Number(scalePct.toFixed(2));
+      el.alignScaleRange.value = Math.max(50, Math.min(150, scalePct));
+    }
+
+    function saveCurrentPageAlignment() {
+      if (!state.compared) return;
+      state.pageAlignments[state.page] = {
+        dxBase: state.align.dx / state.renderedScale,
+        dyBase: state.align.dy / state.renderedScale,
+        angle: state.align.angle,
+        scale: state.align.scale,
+      };
+    }
+
+    function restorePageAlignmentOrReset() {
+      const saved = state.pageAlignments[state.page];
+      if (saved) {
+        state.align = {
+          dx: saved.dxBase * state.renderedScale,
+          dy: saved.dyBase * state.renderedScale,
+          angle: saved.angle,
+          scale: saved.scale,
+        };
+      } else {
+        state.align = { dx: 0, dy: 0, angle: 0, scale: 1 };
+      }
+      syncAlignInputsFromState();
+    }
+
+    function resetAlignParams(rerender = true) {
+      state.align = { dx: 0, dy: 0, angle: 0, scale: 1 };
+      delete state.pageAlignments[state.page];
+      syncAlignInputsFromState();
+      if (rerender && state.compared && state.rawNewCanvas) {
+        applyAlignmentToNewCanvas(false);
+        computeDiff();
+        drawThumbs();
+      } else {
+        updateAlignBadge();
+      }
+    }
+
+    async function renderCurrent() {
+      if (!state.old.doc || !state.new.doc) return;
+      cancelPickMode();
+      const seq = ++state.seq;
+      showLoading(true, `ページ ${state.page} をレンダリング中…`, '');
+      try {
+        const scale = state.scale;
+        const [oc, nc] = await Promise.all([
+          renderPage(state.old.doc, state.page, scale),
+          renderPage(state.new.doc, state.page, scale),
+        ]);
+        if (seq !== state.seq) return;
+
+        const W = Math.max(oc ? oc.width : 0, nc ? nc.width : 0) || 1;
+        const H = Math.max(oc ? oc.height : 0, nc ? nc.height : 0) || 1;
+        state.renderedScale = scale;
+        state.missing = { old: !oc, new: !nc };
+
+        state.rawOldCanvas = createPaddedCanvas(oc, W, H);
+        state.rawNewCanvas = createPaddedCanvas(nc, W, H);
+
+        el.oldCanvas.width = W; el.oldCanvas.height = H;
+        el.oldCanvas.getContext('2d', { willReadFrequently: true }).drawImage(state.rawOldCanvas, 0, 0);
+
+        el.overlayCanvas.width = W;
+        el.overlayCanvas.height = H;
+
+        restorePageAlignmentOrReset();
+
+        if (state.autoAlignOnCompare && !state.pageAlignments[state.page] && !state.missing.old && !state.missing.new) {
+          showLoading(true, 'ズレ・傾き・縮尺を自動補正中…', '特徴点と画像相関を解析しています');
+          await new Promise(requestAnimationFrame);
+          if (seq !== state.seq) return;
+          const result = computeAutoAlignment(state.rawOldCanvas, state.rawNewCanvas, state.threshold);
+          state.align = result;
+          syncAlignInputsFromState();
+          saveCurrentPageAlignment();
+        }
+
+        applyAlignmentToNewCanvas(false);
+
+        showLoading(true, '差分を計算中…', '');
+        await new Promise(requestAnimationFrame);
+        if (seq !== state.seq) return;
+
+        computeDiff();
+        drawThumbs();
+        updateNotice();
+        el.emptyState.classList.add('hidden');
+        el.canvasStage.classList.remove('hidden');
+        setTab(state.tab);
+        applyZoom();
+      } catch (err) {
+        console.error(err);
+        toast('レンダリングに失敗しました: ' + (err.message || err), 'error');
+      } finally {
+        if (seq === state.seq) showLoading(false);
+        updateControls();
+      }
+    }
+
+    /* ---------- Automatic Alignment Engine ---------- */
+    function extractInkMap(canvas, w, h, threshold) {
+      const tmp = document.createElement('canvas');
+      tmp.width = w; tmp.height = h;
+      const ctx = tmp.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(canvas, 0, 0, w, h);
+      const data = ctx.getImageData(0, 0, w, h).data;
+      const ink = new Float32Array(w * h);
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        const lum = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+        if (lum < threshold) {
+          ink[p] = (255 - lum) / 255.0;
+        }
+      }
+      return ink;
+    }
+
+    function gaussianBlurSeparable(src, w, h, radius) {
+      const sigma = Math.max(0.6, radius * 0.5);
+      const kSize = radius * 2 + 1;
+      const kernel = new Float32Array(kSize);
+      let sum = 0;
+      for (let i = -radius; i <= radius; i++) {
+        const v = Math.exp(-(i * i) / (2 * sigma * sigma));
+        kernel[i + radius] = v;
+        sum += v;
+      }
+      for (let i = 0; i < kSize; i++) kernel[i] /= sum;
+
+      const tmp = new Float32Array(w * h);
+      const out = new Float32Array(w * h);
+
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+          let acc = 0;
+          for (let k = -radius; k <= radius; k++) {
+            const xx = Math.min(w - 1, Math.max(0, x + k));
+            acc += src[row + xx] * kernel[k + radius];
+          }
+          tmp[row + x] = acc;
+        }
+      }
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          let acc = 0;
+          for (let k = -radius; k <= radius; k++) {
+            const yy = Math.min(h - 1, Math.max(0, y + k));
+            acc += tmp[yy * w + x] * kernel[k + radius];
+          }
+          out[y * w + x] = acc;
+        }
+      }
+      return out;
+    }
+
+    function detectKeypoints(img, w, h, maxPoints = 220) {
+      const gx = new Float32Array(w * h);
+      const gy = new Float32Array(w * h);
+      for (let y = 1; y < h - 1; y++) {
+        const r0 = (y - 1) * w, r1 = y * w, r2 = (y + 1) * w;
+        for (let x = 1; x < w - 1; x++) {
+          gx[r1 + x] = (img[r0 + x + 1] + 2 * img[r1 + x + 1] + img[r2 + x + 1]) -
+                       (img[r0 + x - 1] + 2 * img[r1 + x - 1] + img[r2 + x - 1]);
+          gy[r1 + x] = (img[r2 + x - 1] + 2 * img[r2 + x] + img[r2 + x + 1]) -
+                       (img[r0 + x - 1] + 2 * img[r0 + x] + img[r0 + x + 1]);
+        }
+      }
+
+      const score = new Float32Array(w * h);
+      const margin = 14;
+      for (let y = margin; y < h - margin; y++) {
+        for (let x = margin; x < w - margin; x++) {
+          let sxx = 0, syy = 0, sxy = 0;
+          for (let dy = -2; dy <= 2; dy++) {
+            const rr = (y + dy) * w + x;
+            for (let dx = -2; dx <= 2; dx++) {
+              const ix = gx[rr + dx], iy = gy[rr + dx];
+              sxx += ix * ix;
+              syy += iy * iy;
+              sxy += ix * iy;
+            }
+          }
+          const trace = sxx + syy;
+          const det = sxx * syy - sxy * sxy;
+          const r = det - 0.04 * trace * trace;
+          if (r > 0.0005) score[y * w + x] = r;
+        }
+      }
+
+      const gridCols = 8, gridRows = 8;
+      const perCell = Math.ceil(maxPoints / (gridCols * gridRows)) + 1;
+      const candidates = [];
+
+      for (let gyCell = 0; gyCell < gridRows; gyCell++) {
+        const y0 = Math.max(margin, Math.floor((gyCell * h) / gridRows));
+        const y1 = Math.min(h - margin, Math.floor(((gyCell + 1) * h) / gridRows));
+        for (let gxCell = 0; gxCell < gridCols; gxCell++) {
+          const x0 = Math.max(margin, Math.floor((gxCell * w) / gridCols));
+          const x1 = Math.min(w - margin, Math.floor(((gxCell + 1) * w) / gridCols));
+          const cellPts = [];
+          for (let y = y0; y < y1; y++) {
+            for (let x = x0; x < x1; x++) {
+              const s = score[y * w + x];
+              if (s <= 0) continue;
+              let isMax = true;
+              for (let ny = -4; ny <= 4 && isMax; ny++) {
+                const rr = (y + ny) * w + x;
+                for (let nx = -4; nx <= 4; nx++) {
+                  if (score[rr + nx] > s) { isMax = false; break; }
+                }
+              }
+              if (isMax) cellPts.push({ x, y, s });
+            }
+          }
+          cellPts.sort((a, b) => b.s - a.s);
+          for (let i = 0; i < Math.min(perCell, cellPts.length); i++) {
+            candidates.push(cellPts[i]);
+          }
+        }
+      }
+      candidates.sort((a, b) => b.s - a.s);
+      return candidates.slice(0, maxPoints);
+    }
+
+    function extractPatchDescriptor(img, w, h, cx, cy, angleRad = 0) {
+      const desc = new Float32Array(81);
+      const cosA = Math.cos(angleRad), sinA = Math.sin(angleRad);
+      let mean = 0;
+      let idx = 0;
+      for (let py = -8; py <= 8; py += 2) {
+        for (let px = -8; px <= 8; px += 2) {
+          const rx = cx + px * cosA - py * sinA;
+          const ry = cy + px * sinA + py * cosA;
+          const x0 = Math.max(0, Math.min(w - 1, Math.round(rx)));
+          const y0 = Math.max(0, Math.min(h - 1, Math.round(ry)));
+          const v = img[y0 * w + x0];
+          desc[idx++] = v;
+          mean += v;
+        }
+      }
+      mean /= 81;
+      let norm = 0;
+      for (let i = 0; i < 81; i++) {
+        desc[i] -= mean;
+        norm += desc[i] * desc[i];
+      }
+      norm = Math.sqrt(norm) + 1e-6;
+      for (let i = 0; i < 81; i++) desc[i] /= norm;
+      return desc;
+    }
+
+    function estimateTransformRansac(blurOld, blurNew, w, h) {
+      const kpOld = detectKeypoints(blurOld, w, h, 200);
+      const kpNew = detectKeypoints(blurNew, w, h, 200);
+      if (kpOld.length < 6 || kpNew.length < 6) return null;
+
+      const descOld = kpOld.map((p) => extractPatchDescriptor(blurOld, w, h, p.x, p.y, 0));
+      const testAngles = [-6, -3, 0, 3, 6].map((d) => (d * Math.PI) / 180);
+      const maxDistSq = (Math.max(w, h) * 0.35) ** 2;
+
+      const matches = [];
+      for (let i = 0; i < kpNew.length; i++) {
+        const pn = kpNew[i];
+        let bestScore = -1;
+        let bestIdx = -1;
+
+        for (const ang of testAngles) {
+          const dn = extractPatchDescriptor(blurNew, w, h, pn.x, pn.y, ang);
+          for (let j = 0; j < kpOld.length; j++) {
+            const po = kpOld[j];
+            const d2 = (po.x - pn.x) ** 2 + (po.y - pn.y) ** 2;
+            if (d2 > maxDistSq) continue;
+            const doArr = descOld[j];
+            let dot = 0;
+            for (let k = 0; k < 81; k++) dot += dn[k] * doArr[k];
+            if (dot > bestScore) {
+              bestScore = dot;
+              bestIdx = j;
+            }
+          }
+        }
+        if (bestIdx >= 0 && bestScore > 0.62) {
+          matches.push({ q: pn, p: kpOld[bestIdx], score: bestScore });
+        }
+      }
+
+      if (matches.length < 4) return null;
+
+      const cx = w * 0.5, cy = h * 0.5;
+      const minBaselineSq = (Math.min(w, h) * 0.12) ** 2;
+      let bestInliers = [];
+      const nMatches = matches.length;
+      const maxIter = Math.min(1800, nMatches * (nMatches - 1));
+
+      let seed = 123456789;
+      const randInt = (n) => {
+        seed = (1664525 * seed + 1013904223) >>> 0;
+        return seed % n;
+      };
+
+      for (let it = 0; it < maxIter; it++) {
+        const i1 = randInt(nMatches);
+        const i2 = randInt(nMatches);
+        if (i1 === i2) continue;
+        const m1 = matches[i1], m2 = matches[i2];
+        const vnx = m2.q.x - m1.q.x, vny = m2.q.y - m1.q.y;
+        const lenNSq = vnx * vnx + vny * vny;
+        if (lenNSq < minBaselineSq) continue;
+
+        const vox = m2.p.x - m1.p.x, voy = m2.p.y - m1.p.y;
+        const lenOSq = vox * vox + voy * voy;
+        const s = Math.sqrt(lenOSq / lenNSq);
+        if (s < 0.65 || s > 1.55) continue;
+
+        let theta = Math.atan2(voy, vox) - Math.atan2(vny, vnx);
+        while (theta > Math.PI) theta -= 2 * Math.PI;
+        while (theta < -Math.PI) theta += 2 * Math.PI;
+        if (Math.abs(theta) > (20 * Math.PI) / 180) continue;
+
+        const cosT = Math.cos(theta), sinT = Math.sin(theta);
+        const q1x = m1.q.x - cx, q1y = m1.q.y - cy;
+        const dx = m1.p.x - cx - s * (cosT * q1x - sinT * q1y);
+        const dy = m1.p.y - cy - s * (sinT * q1x + cosT * q1y);
+
+        const inliers = [];
+        for (let k = 0; k < nMatches; k++) {
+          const mk = matches[k];
+          const qkx = mk.q.x - cx, qky = mk.q.y - cy;
+          const px = cx + dx + s * (cosT * qkx - sinT * qky);
+          const py = cy + dy + s * (sinT * qkx + cosT * qky);
+          const errSq = (px - mk.p.x) ** 2 + (py - mk.p.y) ** 2;
+          if (errSq < 12.0) inliers.push(mk);
+        }
+        if (inliers.length > bestInliers.length) {
+          bestInliers = inliers;
+        }
+      }
+
+      if (bestInliers.length < 3) return null;
+
+      let meanQx = 0, meanQy = 0, meanPx = 0, meanPy = 0;
+      const K = bestInliers.length;
+      for (const m of bestInliers) {
+        meanQx += m.q.x; meanQy += m.q.y;
+        meanPx += m.p.x; meanPy += m.p.y;
+      }
+      meanQx /= K; meanQy /= K; meanPx /= K; meanPy /= K;
+
+      let varQ = 0, covDot = 0, covCross = 0;
+      for (const m of bestInliers) {
+        const qx = m.q.x - meanQx, qy = m.q.y - meanQy;
+        const px = m.p.x - meanPx, py = m.p.y - meanPy;
+        varQ += qx * qx + qy * qy;
+        covDot += qx * px + qy * py;
+        covCross += qx * py - qy * px;
+      }
+      if (varQ < 1e-3) return null;
+
+      const theta = Math.atan2(covCross, covDot);
+      const scale = Math.sqrt(covDot * covDot + covCross * covCross) / varQ;
+      if (scale < 0.65 || scale > 1.55 || Math.abs(theta) > (20 * Math.PI) / 180) return null;
+
+      const cosT = Math.cos(theta), sinT = Math.sin(theta);
+      const mqx = meanQx - cx, mqy = meanQy - cy;
+      const dx = meanPx - cx - scale * (cosT * mqx - sinT * mqy);
+      const dy = meanPy - cy - scale * (sinT * mqx + cosT * mqy);
+
+      return { dx, dy, angleRad: theta, scale };
+    }
+
+    function estimateProjectionShift(inkOld, inkNew, w, h) {
+      const projOx = new Float32Array(w), projNx = new Float32Array(w);
+      const projOy = new Float32Array(h), projNy = new Float32Array(h);
+      for (let y = 0; y < h; y++) {
+        const row = y * w;
+        let sumO = 0, sumN = 0;
+        for (let x = 0; x < w; x++) {
+          const vo = inkOld[row + x], vn = inkNew[row + x];
+          projOx[x] += vo; projNx[x] += vn;
+          sumO += vo; sumN += vn;
+        }
+        projOy[y] = sumO; projNy[y] = sumN;
+      }
+      const maxShiftX = Math.floor(w * 0.2);
+      const maxShiftY = Math.floor(h * 0.2);
+      let bestDx = 0, bestScoreX = -1;
+      for (let s = -maxShiftX; s <= maxShiftX; s++) {
+        let dot = 0;
+        for (let x = 0; x < w; x++) {
+          const nx = x - s;
+          if (nx >= 0 && nx < w) dot += projOx[x] * projNx[nx];
+        }
+        if (dot > bestScoreX) { bestScoreX = dot; bestDx = s; }
+      }
+      let bestDy = 0, bestScoreY = -1;
+      for (let s = -maxShiftY; s <= maxShiftY; s++) {
+        let dot = 0;
+        for (let y = 0; y < h; y++) {
+          const ny = y - s;
+          if (ny >= 0 && ny < h) dot += projOy[y] * projNy[ny];
+        }
+        if (dot > bestScoreY) { bestScoreY = dot; bestDy = s; }
+      }
+      return { dx: bestDx, dy: bestDy, angleRad: 0, scale: 1 };
+    }
+
+    function computeAutoAlignment(rawOld, rawNew, threshold) {
+      const W = rawOld.width, H = rawOld.height;
+      const maxWorkDim = 600;
+      const workScale = Math.min(1, maxWorkDim / Math.max(W, H));
+      const w = Math.max(64, Math.round(W * workScale));
+      const h = Math.max(64, Math.round(H * workScale));
+
+      const inkOld = extractInkMap(rawOld, w, h, threshold);
+      const inkNew = extractInkMap(rawNew, w, h, threshold);
+
+      const blurOldWide = gaussianBlurSeparable(inkOld, w, h, 4);
+      const blurNewWide = gaussianBlurSeparable(inkNew, w, h, 4);
+      const blurOldSharp = gaussianBlurSeparable(inkOld, w, h, 1);
+
+      const allInkPts = [];
+      for (let y = 2; y < h - 2; y++) {
+        const row = y * w;
+        for (let x = 2; x < w - 2; x++) {
+          const val = inkNew[row + x];
+          if (val > 0.2) allInkPts.push({ x, y, w: val });
+        }
+      }
+      if (allInkPts.length < 20) {
+        return { dx: 0, dy: 0, angle: 0, scale: 1 };
+      }
+
+      const maxSamples = 5000;
+      const samplePts = [];
+      const stride = Math.max(1, Math.floor(allInkPts.length / maxSamples));
+      for (let i = 0; i < allInkPts.length; i += stride) {
+        samplePts.push(allInkPts[i]);
+      }
+
+      const cx = w * 0.5, cy = h * 0.5;
+
+      function evaluateOverlap(targetField, dx, dy, angleRad, scale) {
+        const cosA = Math.cos(angleRad) * scale;
+        const sinA = Math.sin(angleRad) * scale;
+        let score = 0;
+        const n = samplePts.length;
+        for (let i = 0; i < n; i++) {
+          const pt = samplePts[i];
+          const rx = pt.x - cx;
+          const ry = pt.y - cy;
+          const tx = cx + dx + cosA * rx - sinA * ry;
+          const ty = cy + dy + sinA * rx + cosA * ry;
+          const x0 = Math.floor(tx), y0 = Math.floor(ty);
+          if (x0 < 0 || x0 >= w - 1 || y0 < 0 || y0 >= h - 1) continue;
+          const fx = tx - x0, fy = ty - y0;
+          const idx = y0 * w + x0;
+          const v00 = targetField[idx];
+          const v10 = targetField[idx + 1];
+          const v01 = targetField[idx + w];
+          const v11 = targetField[idx + w + 1];
+          const val = (v00 * (1 - fx) + v10 * fx) * (1 - fy) + (v01 * (1 - fx) + v11 * fx) * fy;
+          score += val * pt.w;
+        }
+        return score;
+      }
+
+      const candidates = [
+        { dx: 0, dy: 0, angleRad: 0, scale: 1 },
+        estimateProjectionShift(blurOldWide, blurNewWide, w, h),
+      ];
+      const ransacCand = estimateTransformRansac(blurOldWide, blurNewWide, w, h);
+      if (ransacCand) candidates.push(ransacCand);
+
+      for (const deg of [-2, -1, 0, 1, 2]) {
+        const rad = (deg * Math.PI) / 180;
+        for (const dy of [-12, -6, 0, 6, 12]) {
+          for (const dx of [-12, -6, 0, 6, 12]) {
+            candidates.push({ dx, dy, angleRad: rad, scale: 1 });
+          }
+        }
+      }
+
+      let best = candidates[0];
+      let bestWideScore = evaluateOverlap(blurOldWide, best.dx, best.dy, best.angleRad, best.scale);
+
+      for (let i = 1; i < candidates.length; i++) {
+        const c = candidates[i];
+        const sc = evaluateOverlap(blurOldWide, c.dx, c.dy, c.angleRad, c.scale);
+        if (sc > bestWideScore) {
+          bestWideScore = sc;
+          best = { ...c };
+        }
+      }
+
+      const wideSteps = [
+        { sxy: 4.0, sAng: (1.0 * Math.PI) / 180, sScale: 0.015 },
+        { sxy: 2.0, sAng: (0.4 * Math.PI) / 180, sScale: 0.006 },
+        { sxy: 1.0, sAng: (0.15 * Math.PI) / 180, sScale: 0.0025 },
+      ];
+      for (const st of wideSteps) {
+        let improved = true;
+        let iter = 0;
+        while (improved && iter++ < 18) {
+          improved = false;
+          for (const ddx of [-st.sxy, 0, st.sxy]) {
+            for (const ddy of [-st.sxy, 0, st.sxy]) {
+              if (ddx === 0 && ddy === 0) continue;
+              const sc = evaluateOverlap(blurOldWide, best.dx + ddx, best.dy + ddy, best.angleRad, best.scale);
+              if (sc > bestWideScore) {
+                bestWideScore = sc;
+                best.dx += ddx;
+                best.dy += ddy;
+                improved = true;
+              }
+            }
+          }
+          for (const dAng of [-st.sAng, st.sAng]) {
+            const sc = evaluateOverlap(blurOldWide, best.dx, best.dy, best.angleRad + dAng, best.scale);
+            if (sc > bestWideScore) {
+              bestWideScore = sc;
+              best.angleRad += dAng;
+              improved = true;
+            }
+          }
+          for (const dSc of [-st.sScale, st.sScale]) {
+            const nextScale = best.scale + dSc;
+            if (nextScale < 0.65 || nextScale > 1.55) continue;
+            const sc = evaluateOverlap(blurOldWide, best.dx, best.dy, best.angleRad, nextScale);
+            if (sc > bestWideScore) {
+              bestWideScore = sc;
+              best.scale = nextScale;
+              improved = true;
+            }
+          }
+        }
+      }
+
+      let bestSharpScore = evaluateOverlap(blurOldSharp, best.dx, best.dy, best.angleRad, best.scale);
+      const sharpSteps = [
+        { sxy: 0.5, sAng: (0.06 * Math.PI) / 180, sScale: 0.001 },
+        { sxy: 0.2, sAng: (0.02 * Math.PI) / 180, sScale: 0.0004 },
+        { sxy: 0.08, sAng: (0.008 * Math.PI) / 180, sScale: 0.00015 },
+      ];
+      for (const st of sharpSteps) {
+        let improved = true;
+        let iter = 0;
+        while (improved && iter++ < 15) {
+          improved = false;
+          for (const ddx of [-st.sxy, 0, st.sxy]) {
+            for (const ddy of [-st.sxy, 0, st.sxy]) {
+              if (ddx === 0 && ddy === 0) continue;
+              const sc = evaluateOverlap(blurOldSharp, best.dx + ddx, best.dy + ddy, best.angleRad, best.scale);
+              if (sc > bestSharpScore) {
+                bestSharpScore = sc;
+                best.dx += ddx;
+                best.dy += ddy;
+                improved = true;
+              }
+            }
+          }
+          for (const dAng of [-st.sAng, st.sAng]) {
+            const sc = evaluateOverlap(blurOldSharp, best.dx, best.dy, best.angleRad + dAng, best.scale);
+            if (sc > bestSharpScore) {
+              bestSharpScore = sc;
+              best.angleRad += dAng;
+              improved = true;
+            }
+          }
+          for (const dSc of [-st.sScale, st.sScale]) {
+            const sc = evaluateOverlap(blurOldSharp, best.dx, best.dy, best.angleRad, best.scale + dSc);
+            if (sc > bestSharpScore) {
+              bestSharpScore = sc;
+              best.scale += dSc;
+              improved = true;
+            }
+          }
+        }
+      }
+
+      const identityScore = evaluateOverlap(blurOldSharp, 0, 0, 0, 1);
+      if (bestSharpScore <= identityScore * 1.002) {
+        return { dx: 0, dy: 0, angle: 0, scale: 1 };
+      }
+
+      const fullDx = best.dx / workScale;
+      const fullDy = best.dy / workScale;
+      const angleDeg = (best.angleRad * 180) / Math.PI;
+
+      return {
+        dx: Math.abs(fullDx) < 0.08 ? 0 : Number(fullDx.toFixed(2)),
+        dy: Math.abs(fullDy) < 0.08 ? 0 : Number(fullDy.toFixed(2)),
+        angle: Math.abs(angleDeg) < 0.008 ? 0 : Number(angleDeg.toFixed(3)),
+        scale: Math.abs(best.scale - 1) < 0.0003 ? 1 : Number(best.scale.toFixed(5)),
+      };
+    }
+
+    async function runManualAutoAlign() {
+      if (!state.compared || !state.rawOldCanvas || !state.rawNewCanvas) return;
+      cancelPickMode();
+      showLoading(true, '位置・傾き・縮尺を自動補正中…', '特徴点マッチングとサブピクセル位置合わせを実行しています');
+      await new Promise(requestAnimationFrame);
+      await new Promise((r) => setTimeout(r, 20));
+      try {
+        const res = computeAutoAlignment(state.rawOldCanvas, state.rawNewCanvas, state.threshold);
+        state.align = res;
+        syncAlignInputsFromState();
+        saveCurrentPageAlignment();
+        applyAlignmentToNewCanvas(false);
+        computeDiff();
+        drawThumbs();
+        if (isAlignIdentity()) {
+          toast('すでに最適な位置で一致しています（補正量 0）', 'info');
+        } else {
+          toast(`自動補正完了: X=${res.dx.toFixed(1)}px, Y=${res.dy.toFixed(1)}px, 傾き=${res.angle.toFixed(2)}°, 縮尺=${(res.scale * 100).toFixed(2)}%`, 'success');
+        }
+      } finally {
+        showLoading(false);
+      }
+    }
+
+    /* ---------- 2-Point Manual Alignment ---------- */
+    function startPick2PtMode() {
+      if (!state.compared || !state.rawOldCanvas || !state.rawNewCanvas) return;
+      state.picking = {
+        active: true,
+        step: 1,
+        oldPt1: null,
+        oldPt2: null,
+        newPt1: null,
+        newPt2: null,
+      };
+      el.canvasStage.classList.add('picking-mode');
+      el.overlayCanvas.classList.remove('hidden');
+      el.pickBanner.classList.remove('hidden');
+      updatePickBannerAndView();
+      drawPickOverlay();
+    }
+
+    function cancelPickMode() {
+      if (!state.picking.active) return;
+      state.picking.active = false;
+      state.picking.step = 0;
+      el.canvasStage.classList.remove('picking-mode');
+      el.overlayCanvas.classList.add('hidden');
+      el.pickBanner.classList.add('hidden');
+      if (state.compared && state.rawNewCanvas) {
+        applyAlignmentToNewCanvas(false);
+      }
+    }
+
+    function updatePickBannerAndView() {
+      const st = state.picking.step;
+      if (st === 1) {
+        setTab('old');
+        el.pickBannerText.textContent = '[ステップ 1/4] 旧版（赤）の基準点 ① をクリックしてください（図面枠の角や交点など）';
+      } else if (st === 2) {
+        setTab('old');
+        el.pickBannerText.textContent = '[ステップ 2/4] 旧版（赤）の基準点 ② をクリックしてください（点①から離れた別の角や交点）';
+      } else if (st === 3) {
+        applyAlignmentToNewCanvas(true);
+        setTab('new');
+        el.pickBannerText.textContent = '[ステップ 3/4] 新版（青）の対応する基準点 ① をクリックしてください';
+      } else if (st === 4) {
+        setTab('new');
+        el.pickBannerText.textContent = '[ステップ 4/4] 新版（青）の対応する基準点 ② をクリックしてください';
+      }
+    }
+
+    function drawPin(ctx, pt, label, color) {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2.5;
+      const r = 14;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(pt.x - r - 6, pt.y); ctx.lineTo(pt.x + r + 6, pt.y);
+      ctx.moveTo(pt.x, pt.y - r - 6); ctx.lineTo(pt.x, pt.y + r + 6);
+      ctx.stroke();
+      ctx.font = 'bold 14px Inter, sans-serif';
+      ctx.fillStyle = color;
+      ctx.fillRect(pt.x + 12, pt.y - 28, 24, 20);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(label, pt.x + 17, pt.y - 13);
+      ctx.restore();
+    }
+
+    function drawPickOverlay() {
+      const ctx = el.overlayCanvas.getContext('2d');
+      ctx.clearRect(0, 0, el.overlayCanvas.width, el.overlayCanvas.height);
+      if (!state.picking.active) return;
+
+      const { step, oldPt1, oldPt2, newPt1, newPt2 } = state.picking;
+      if (step <= 2) {
+        if (oldPt1) drawPin(ctx, oldPt1, '1', '#f43f5e');
+        if (oldPt2) {
+          drawPin(ctx, oldPt2, '2', '#f43f5e');
+          ctx.save();
+          ctx.strokeStyle = '#f43f5e';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([6, 4]);
+          ctx.beginPath();
+          ctx.moveTo(oldPt1.x, oldPt1.y);
+          ctx.lineTo(oldPt2.x, oldPt2.y);
+          ctx.stroke();
+          ctx.restore();
+        }
+      } else {
+        if (newPt1) drawPin(ctx, newPt1, '1', '#3b82f6');
+        if (newPt2) drawPin(ctx, newPt2, '2', '#3b82f6');
+      }
+    }
+
+    el.canvasStage.addEventListener('click', (e) => {
+      if (!state.picking.active) return;
+      const activeCanvas = canvases[state.tab];
+      if (!activeCanvas) return;
+      const rect = activeCanvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const x = ((e.clientX - rect.left) / rect.width) * activeCanvas.width;
+      const y = ((e.clientY - rect.top) / rect.height) * activeCanvas.height;
+      const pt = { x, y };
+
+      if (state.picking.step === 1) {
+        state.picking.oldPt1 = pt;
+        state.picking.step = 2;
+        updatePickBannerAndView();
+        drawPickOverlay();
+      } else if (state.picking.step === 2) {
+        const d = Math.hypot(pt.x - state.picking.oldPt1.x, pt.y - state.picking.oldPt1.y);
+        if (d < 15) {
+          toast('基準点①と近すぎます。離れた別の点をクリックしてください。', 'error');
+          return;
+        }
+        state.picking.oldPt2 = pt;
+        state.picking.step = 3;
+        updatePickBannerAndView();
+        drawPickOverlay();
+      } else if (state.picking.step === 3) {
+        state.picking.newPt1 = pt;
+        state.picking.step = 4;
+        updatePickBannerAndView();
+        drawPickOverlay();
+      } else if (state.picking.step === 4) {
+        const d = Math.hypot(pt.x - state.picking.newPt1.x, pt.y - state.picking.newPt1.y);
+        if (d < 15) {
+          toast('基準点①と近すぎます。離れた別の点をクリックしてください。', 'error');
+          return;
+        }
+        state.picking.newPt2 = pt;
+        finishPick2PtAlignment();
+      }
+    });
+
+    function finishPick2PtAlignment() {
+      const { oldPt1: p1, oldPt2: p2, newPt1: q1, newPt2: q2 } = state.picking;
+      const W = state.rawOldCanvas.width;
+      const H = state.rawOldCanvas.height;
+      const cx = W * 0.5, cy = H * 0.5;
+
+      const vox = p2.x - p1.x, voy = p2.y - p1.y;
+      const vnx = q2.x - q1.x, vny = q2.y - q1.y;
+      const lenO = Math.hypot(vox, voy);
+      const lenN = Math.hypot(vnx, vny);
+
+      const scale = lenO / Math.max(1e-5, lenN);
+      let theta = Math.atan2(voy, vox) - Math.atan2(vny, vnx);
+      while (theta > Math.PI) theta -= 2 * Math.PI;
+      while (theta < -Math.PI) theta += 2 * Math.PI;
+
+      const cosT = Math.cos(theta), sinT = Math.sin(theta);
+      const mox = 0.5 * (p1.x + p2.x), moy = 0.5 * (p1.y + p2.y);
+      const mnx = 0.5 * (q1.x + q2.x) - cx, mny = 0.5 * (q1.y + q2.y) - cy;
+
+      const dx = mox - cx - scale * (cosT * mnx - sinT * mny);
+      const dy = moy - cy - scale * (sinT * mnx + cosT * mny);
+      const angleDeg = (theta * 180) / Math.PI;
+
+      cancelPickMode();
+
+      state.align = {
+        dx: Number(dx.toFixed(2)),
+        dy: Number(dy.toFixed(2)),
+        angle: Number(angleDeg.toFixed(3)),
+        scale: Number(scale.toFixed(5)),
+      };
+      syncAlignInputsFromState();
+      saveCurrentPageAlignment();
+      applyAlignmentToNewCanvas(false);
+      computeDiff();
+      drawThumbs();
+      setTab('diff');
+      toast(`2点指定補正を適用しました（X=${state.align.dx}px, Y=${state.align.dy}px, 傾き=${state.align.angle.toFixed(2)}°, 縮尺=${(state.align.scale * 100).toFixed(1)}%）`, 'success');
+    }
+
+    el.pickCancelBtn.addEventListener('click', () => {
+      cancelPickMode();
+      setTab('diff');
+    });
+
+    /* ---------- Diff core ---------- */
+    function computeDiff() {
+      const W = el.oldCanvas.width, H = el.oldCanvas.height;
+      const o = el.oldCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+      const n = el.newCanvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+
+      el.diffCanvas.width = W; el.diffCanvas.height = H;
+      const dctx = el.diffCanvas.getContext('2d');
+      const out = dctx.createImageData(W, H);
+      const d = out.data;
+
+      const th = state.threshold;
+      const [rr, rg, rb] = COLOR.removed;
+      const [ar, ag, ab] = COLOR.added;
+      const [cr, cg, cb] = state.showCommon ? COLOR.common : COLOR.bg;
+      let removed = 0, added = 0, common = 0;
+
+      for (let i = 0, len = o.length; i < len; i += 4) {
+        const lo = (o[i] * 77 + o[i + 1] * 150 + o[i + 2] * 29) >> 8;
+        const ln = (n[i] * 77 + n[i + 1] * 150 + n[i + 2] * 29) >> 8;
+        const inkO = lo < th;
+        const inkN = ln < th;
+
+        if (inkO && inkN) {
+          d[i] = cr; d[i + 1] = cg; d[i + 2] = cb; common++;
+        } else if (inkO) {
+          d[i] = rr; d[i + 1] = rg; d[i + 2] = rb; removed++;
+        } else if (inkN) {
+          d[i] = ar; d[i + 1] = ag; d[i + 2] = ab; added++;
+        } else {
+          d[i] = 255; d[i + 1] = 255; d[i + 2] = 255;
+        }
+        d[i + 3] = 255;
+      }
+      dctx.putImageData(out, 0, 0);
+      updateStats(removed, added, common, W, H);
+    }
+
+    function updateStats(removed, added, common, W, H) {
+      const ink = removed + added + common;
+      const changed = removed + added;
+      const rate = ink ? (changed / ink) * 100 : 0;
+      el.statRate.textContent = rate.toFixed(rate < 10 ? 2 : 1) + '%';
+      el.statRemoved.textContent = fmt(removed) + ' px';
+      el.statAdded.textContent = fmt(added) + ' px';
+      el.statCommon.textContent = fmt(common) + ' px';
+      el.statSize.innerHTML = `${W} × ${H}<br>@${state.renderedScale}x`;
+      const pct = (v) => (ink ? (v / ink) * 100 : 0) + '%';
+      el.barRemoved.style.width = pct(removed);
+      el.barAdded.style.width = pct(added);
+      el.barCommon.style.width = pct(common);
+
+      el.diffBadge.classList.remove('hidden');
+      if (changed === 0) {
+        el.diffBadge.className = 'rounded-full px-2.5 py-1 text-xs font-semibold bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30';
+        el.diffBadge.textContent = '✓ 差分なし';
+      } else {
+        el.diffBadge.className = 'rounded-full px-2.5 py-1 text-xs font-semibold bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30';
+        el.diffBadge.textContent = '● 差分あり';
+      }
+    }
+
+    function drawThumbs() {
+      const pairs = [['old', el.thumbOld, el.thumbOldEmpty, el.oldCanvas], ['new', el.thumbNew, el.thumbNewEmpty, el.newCanvas]];
+      for (const [kind, thumb, empty, src] of pairs) {
+        if (state.missing[kind]) {
+          thumb.classList.add('hidden'); empty.classList.remove('hidden');
+          continue;
+        }
+        const w = 300;
+        const h = Math.round((src.height / src.width) * w);
+        thumb.width = w; thumb.height = h;
+        const ctx = thumb.getContext('2d');
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(src, 0, 0, w, h);
+        thumb.classList.remove('hidden'); empty.classList.add('hidden');
+      }
+    }
+
+    function updateNotice() {
+      const msgs = [];
+      if (state.missing.old) msgs.push(`旧版にはページ ${state.page} が存在しません（白紙として比較）。`);
+      if (state.missing.new) msgs.push(`新版にはページ ${state.page} が存在しません（白紙として比較）。`);
+      if (!msgs.length && state.old.doc && state.new.doc && state.old.doc.numPages !== state.new.doc.numPages) {
+        msgs.push(`ページ数が異なります（旧版 ${state.old.doc.numPages} / 新版 ${state.new.doc.numPages}）。`);
+      }
+      el.pageNotice.textContent = '⚠ ' + msgs.join(' ');
+      el.pageNotice.classList.toggle('hidden', !msgs.length);
+    }
+
+    /* ---------- View: tabs & zoom ---------- */
+    function setTab(tab) {
+      state.tab = tab;
+      document.querySelectorAll('.tab-btn').forEach((b) => {
+        const active = b.dataset.tab === tab;
+        b.setAttribute('aria-selected', active);
+        b.className = 'tab-btn px-4 py-1.5 rounded-lg text-sm font-medium transition ' + (active
+          ? (tab === 'old' ? 'bg-rose-500/90 text-white shadow' : tab === 'new' ? 'bg-blue-500/90 text-white shadow' : 'bg-gradient-to-r from-rose-500 via-violet-500 to-blue-500 text-white shadow')
+          : 'text-slate-400 hover:text-white hover:bg-white/5');
+      });
+      if (state.compared) {
+        for (const [k, c] of Object.entries(canvases)) c.classList.toggle('hidden', k !== tab);
+      }
+      $('thumbOldBtn').classList.toggle('active', tab === 'old');
+      $('thumbNewBtn').classList.toggle('active', tab === 'new');
+      $('thumbDiffBtn').classList.toggle('active', tab === 'diff');
+    }
+
+    function applyZoom() {
+      if (state.zoom === 'fit') {
+        el.canvasStage.style.width = '100%';
+        for (const c of Object.values(canvases)) {
+          c.style.width = '100%';
+          c.style.maxWidth = '100%';
+          c.style.height = 'auto';
+        }
+      } else {
+        el.canvasStage.style.width = 'auto';
+        for (const c of Object.values(canvases)) {
+          c.style.maxWidth = 'none';
+          c.style.width = Math.round((c.width / state.renderedScale) * state.zoom) + 'px';
+          c.style.height = 'auto';
+        }
+      }
+      el.zoomLabel.textContent = state.zoom === 'fit' ? '幅合わせ' : Math.round(state.zoom * 100) + '%';
+    }
+
+    function currentZoomValue() {
+      if (state.zoom !== 'fit') return state.zoom;
+      const c = canvases[state.tab];
+      if (!c.width) return 1;
+      return c.getBoundingClientRect().width / (c.width / state.renderedScale);
+    }
+    function zoomBy(dir) {
+      if (!state.compared) return;
+      const z = currentZoomValue();
+      let next;
+      if (dir > 0) next = ZOOM_STEPS.find((s) => s > z + 0.001) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1];
+      else next = [...ZOOM_STEPS].reverse().find((s) => s < z - 0.001) ?? ZOOM_STEPS[0];
+      state.zoom = next;
+      applyZoom();
+    }
+
+    /* ---------- Alignment UI Controls Binding ---------- */
+    let alignDebounce = null;
+    function onAlignParamEdited() {
+      syncAlignInputsFromState();
+      if (!state.compared || !state.rawNewCanvas) return;
+      saveCurrentPageAlignment();
+      clearTimeout(alignDebounce);
+      alignDebounce = setTimeout(() => {
+        applyAlignmentToNewCanvas(false);
+        computeDiff();
+        drawThumbs();
+      }, 16);
+    }
+
+    function bindAlignPair(inputEl, rangeEl, key, isScalePct = false) {
+      const updateFromVal = (rawVal) => {
+        const num = parseFloat(rawVal);
+        if (Number.isNaN(num)) return;
+        if (isScalePct) {
+          state.align.scale = Math.max(0.2, Math.min(3.0, num / 100));
+        } else {
+          state.align[key] = num;
+        }
+        onAlignParamEdited();
+      };
+      inputEl.addEventListener('change', () => updateFromVal(inputEl.value));
+      inputEl.addEventListener('input', () => updateFromVal(inputEl.value));
+      rangeEl.addEventListener('input', () => updateFromVal(rangeEl.value));
+    }
+    bindAlignPair(el.alignDxInput, el.alignDxRange, 'dx', false);
+    bindAlignPair(el.alignDyInput, el.alignDyRange, 'dy', false);
+    bindAlignPair(el.alignAngleInput, el.alignAngleRange, 'angle', false);
+    bindAlignPair(el.alignScaleInput, el.alignScaleRange, 'scale', true);
+
+    document.querySelectorAll('.nudge-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!state.compared) return;
+        const prop = btn.dataset.nudge;
+        const step = parseFloat(btn.dataset.step);
+        if (prop === 'scalePct') {
+          const pct = state.align.scale * 100 + step;
+          state.align.scale = Math.max(0.2, Math.min(3.0, pct / 100));
+        } else {
+          state.align[prop] = Number((state.align[prop] + step).toFixed(3));
+        }
+        onAlignParamEdited();
+      });
+    });
+
+    el.autoAlignBtn.addEventListener('click', () => runManualAutoAlign());
+    el.pick2PtBtn.addEventListener('click', () => {
+      if (state.picking.active) cancelPickMode();
+      else startPick2PtMode();
+    });
+    el.alignResetBtn.addEventListener('click', () => {
+      cancelPickMode();
+      resetAlignParams(true);
+      toast('位置・傾き・縮尺補正をリセットしました', 'info');
+    });
+
+    el.autoAlignToggle.addEventListener('change', () => {
+      state.autoAlignOnCompare = el.autoAlignToggle.checked;
+      if (state.autoAlignOnCompare && state.compared && isAlignIdentity()) {
+        runManualAutoAlign();
+      }
+    });
+
+    /* ---------- Controls ---------- */
+    function updateControls() {
+      const ready = !!(state.old.doc && state.new.doc);
+      el.compareBtn.disabled = !ready;
+      state.total = ready ? Math.max(state.old.doc.numPages, state.new.doc.numPages) : 0;
+      if (state.compared && ready) {
+        el.pageInfo.textContent = `${state.page} / ${state.total}`;
+        el.prevBtn.disabled = state.page <= 1;
+        el.nextBtn.disabled = state.page >= state.total;
+        el.downloadBtn.disabled = false;
+        el.autoAlignBtn.disabled = false;
+        el.pick2PtBtn.disabled = false;
+        el.alignResetBtn.disabled = false;
+      } else {
+        el.pageInfo.textContent = '– / –';
+        el.prevBtn.disabled = el.nextBtn.disabled = true;
+        el.downloadBtn.disabled = true;
+        el.autoAlignBtn.disabled = true;
+        el.pick2PtBtn.disabled = true;
+        el.alignResetBtn.disabled = true;
+      }
+    }
+
+    function goTo(page) {
+      if (!state.compared) return;
+      const p = Math.min(Math.max(1, page), state.total);
+      if (p === state.page) return;
+      state.page = p;
+      updateControls();
+      renderCurrent();
+    }
+
+    el.compareBtn.addEventListener('click', () => {
+      if (!state.old.doc || !state.new.doc) return;
+      state.compared = true;
+      state.page = 1;
+      state.tab = 'diff';
+      updateControls();
+      renderCurrent();
+    });
+    el.prevBtn.addEventListener('click', () => goTo(state.page - 1));
+    el.nextBtn.addEventListener('click', () => goTo(state.page + 1));
+
+    document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+      if (state.picking.active) cancelPickMode();
+      setTab(b.dataset.tab);
+    }));
+    setTab('diff');
+
+    el.scaleSelect.addEventListener('change', () => {
+      state.scale = parseFloat(el.scaleSelect.value);
+      if (state.compared) renderCurrent();
+    });
+
+    let thTimer = null;
+    el.thresholdRange.addEventListener('input', () => {
+      state.threshold = parseInt(el.thresholdRange.value, 10);
+      el.thresholdValue.textContent = state.threshold;
+      clearTimeout(thTimer);
+      thTimer = setTimeout(() => { if (state.compared && el.oldCanvas.width) computeDiff(); }, 50);
+    });
+    el.commonToggle.addEventListener('change', () => {
+      state.showCommon = el.commonToggle.checked;
+      if (state.compared && el.oldCanvas.width) computeDiff();
+    });
+
+    el.zoomIn.addEventListener('click', () => zoomBy(1));
+    el.zoomOut.addEventListener('click', () => zoomBy(-1));
+    el.zoomFit.addEventListener('click', () => { state.zoom = 'fit'; applyZoom(); });
+    el.viewport.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey || !state.compared) return;
+      e.preventDefault();
+      zoomBy(e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+
+    el.downloadBtn.addEventListener('click', () => {
+      const c = canvases[state.tab];
+      const label = { diff: 'diff', old: 'old', new: 'new' }[state.tab];
+      c.toBlob((blob) => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `page${state.page}_${label}.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }, 'image/png');
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.target.matches('input, select, textarea')) return;
+      if (e.key === 'Escape' && state.picking.active) {
+        cancelPickMode();
+        setTab('diff');
+        return;
+      }
+      switch (e.key) {
+        case 'ArrowLeft': case 'PageUp': goTo(state.page - 1); e.preventDefault(); break;
+        case 'ArrowRight': case 'PageDown': goTo(state.page + 1); e.preventDefault(); break;
+        case '1': if (state.picking.active) cancelPickMode(); setTab('diff'); break;
+        case '2': if (state.picking.active) cancelPickMode(); setTab('old'); break;
+        case '3': if (state.picking.active) cancelPickMode(); setTab('new'); break;
+        case 'a': case 'A': if (state.compared) runManualAutoAlign(); break;
+        case '+': case '=': zoomBy(1); break;
+        case '-': zoomBy(-1); break;
+        case '0': state.zoom = 'fit'; applyZoom(); break;
+      }
+    });
+
+    updateControls();
+  })();
+  </script>
+</body>
+</html>
