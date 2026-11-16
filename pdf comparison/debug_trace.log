@@ -1,0 +1,9 @@
+﻿[2026-11-16 20:50:19.702] [INIT] DataClasysNativeManager initialized. ClsuClientPath=C:\Program Files\DataClasys\UserClient\CLSUClient.exe (exists=False)
+[2026-11-16 20:50:19.714] [STARTUP] PDFDiffStudio starting. BaseDir=C:\Users\emuta\Development\pdf comparison\
+[2026-11-16 20:50:19.731] [SERVER] Listening on http://127.0.0.1:62369/
+[2026-11-16 20:50:19.736] [LAUNCH] Starting Edge: C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe --app="http://127.0.0.1:62369/" --window-size=1500,940 --no-proxy-server --disable-extensions --user-data-dir="C:\Users\emuta\AppData\Local\KinkiSharyo\Workspaces\ks_project_tool\edge_app_profile"
+[2026-11-16 20:50:20.266] [HTTP] GET / (body=0 bytes)
+[2026-11-16 20:50:20.682] [HTTP] GET /api/status (body=0 bytes)
+[2026-11-16 20:50:21.067] [HTTP] GET /favicon.ico (body=0 bytes)
+[2026-11-16 20:50:21.067] [WARN] 404 Not Found: GET /favicon.ico
+[2026-11-16 20:50:32.906] [HTTP] POST /api/shutdown (body=0 bytes)

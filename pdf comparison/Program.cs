@@ -22,6 +22,67 @@ namespace PDFDiffStudio
         public string LocalPath = "";
     }
 
+    public static class DebugLogger
+    {
+        private static readonly object _lock = new object();
+        private static readonly List<string> _entries = new List<string>();
+        private static string _logFilePath = null;
+
+        public static string LogFilePath
+        {
+            get
+            {
+                if (_logFilePath == null)
+                {
+                    try
+                    {
+                        string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                        _logFilePath = Path.Combine(baseDir, "debug_trace.log");
+                    }
+                    catch
+                    {
+                        _logFilePath = Path.Combine(Path.GetTempPath(), "pdf_diff_debug_trace.log");
+                    }
+                }
+                return _logFilePath;
+            }
+        }
+
+        public static void Log(string category, string message)
+        {
+            string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss.fff}] [{1}] {2}", DateTime.Now, category, message);
+            lock (_lock)
+            {
+                _entries.Add(line);
+                if (_entries.Count > 1000)
+                {
+                    _entries.RemoveAt(0);
+                }
+                try
+                {
+                    File.AppendAllText(LogFilePath, line + "\r\n", Encoding.UTF8);
+                }
+                catch { }
+            }
+        }
+
+        public static List<string> GetEntries()
+        {
+            lock (_lock)
+            {
+                return new List<string>(_entries);
+            }
+        }
+
+        public static void Clear()
+        {
+            lock (_lock)
+            {
+                _entries.Clear();
+            }
+        }
+    }
+
     public class DataClasysNativeManager
     {
         public string AppId = "ks_project_tool";
@@ -35,6 +96,19 @@ namespace PDFDiffStudio
 
         private readonly object _sync = new object();
         public ProgressState LatestProgress = new ProgressState();
+
+        public DataClasysNativeManager()
+        {
+            if (!File.Exists(ClsuClientPath))
+            {
+                string x86Candidate = @"C:\Program Files (x86)\DataClasys\UserClient\CLSUClient.exe";
+                if (File.Exists(x86Candidate))
+                {
+                    ClsuClientPath = x86Candidate;
+                }
+            }
+            DebugLogger.Log("INIT", "DataClasysNativeManager initialized. ClsuClientPath=" + ClsuClientPath + " (exists=" + File.Exists(ClsuClientPath) + ")");
+        }
 
         public bool IsDataClasysAvailable()
         {
@@ -54,7 +128,10 @@ namespace PDFDiffStudio
                     return root;
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                DebugLogger.Log("WARN", "GetAppRoot LocalApplicationData failed: " + ex.Message);
+            }
 
             string fallbackRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".dataclasys_workspace", AppId);
             Directory.CreateDirectory(Path.Combine(fallbackRoot, "sessions"));
@@ -99,6 +176,7 @@ namespace PDFDiffStudio
                     LocalPath = localPath ?? ""
                 };
             }
+            DebugLogger.Log("STAGE:" + stage, message + (string.IsNullOrEmpty(localPath) ? "" : " [local=" + localPath + "]"));
             if (!string.IsNullOrEmpty(logsDir))
             {
                 LogLine(Path.Combine(logsDir, "events.log"), stage + ": " + message);
@@ -115,6 +193,33 @@ namespace PDFDiffStudio
             catch { }
         }
 
+        public static string InspectHeaderHex(string path, int maxBytes = 16)
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    int len = (int)Math.Min(maxBytes, fs.Length);
+                    byte[] buf = new byte[len];
+                    int read = fs.Read(buf, 0, len);
+                    StringBuilder hex = new StringBuilder();
+                    StringBuilder ascii = new StringBuilder();
+                    for (int i = 0; i < read; i++)
+                    {
+                        if (i > 0) hex.Append(' ');
+                        hex.AppendFormat("{0:X2}", buf[i]);
+                        char c = (char)buf[i];
+                        ascii.Append(c >= 32 && c < 127 ? c : '.');
+                    }
+                    return string.Format("size={0} bytes, hex=[{1}], ascii=[{2}]", fs.Length, hex.ToString(), ascii.ToString());
+                }
+            }
+            catch (Exception ex)
+            {
+                return "InspectHeader error: " + ex.Message;
+            }
+        }
+
         public static bool LooksLikePdf(string path)
         {
             try
@@ -122,10 +227,17 @@ namespace PDFDiffStudio
                 using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 {
                     if (fs.Length < 5) return false;
-                    byte[] header = new byte[5];
-                    int read = fs.Read(header, 0, 5);
-                    if (read < 5) return false;
-                    return header[0] == 0x25 && header[1] == 0x50 && header[2] == 0x44 && header[3] == 0x46 && header[4] == 0x2D; // %PDF-
+                    int checkLen = (int)Math.Min(1024, fs.Length);
+                    byte[] buf = new byte[checkLen];
+                    int read = fs.Read(buf, 0, checkLen);
+                    for (int i = 0; i <= read - 5; i++)
+                    {
+                        if (buf[i] == 0x25 && buf[i + 1] == 0x50 && buf[i + 2] == 0x44 && buf[i + 3] == 0x46 && buf[i + 4] == 0x2D)
+                        {
+                            return true; // %PDF-
+                        }
+                    }
+                    return false;
                 }
             }
             catch
@@ -150,20 +262,27 @@ namespace PDFDiffStudio
 
         public byte[] OpenAndReadServerPdf(string serverPath, out string workspaceMode, out string fileName)
         {
+            DebugLogger.Log("OPEN", "OpenAndReadServerPdf called: serverPath=" + serverPath);
             if (!File.Exists(serverPath))
             {
-                throw new FileNotFoundException("指定されたファイルが見つかりません: " + serverPath);
+                string msg = "指定されたファイルが見つかりません: " + serverPath;
+                DebugLogger.Log("ERROR", msg);
+                throw new FileNotFoundException(msg);
             }
 
             fileName = Path.GetFileName(serverPath);
             string sessionId = DateTime.Now.ToString("yyyyMMdd_HHmmss") + "_" + Guid.NewGuid().ToString("N").Substring(0, 6);
-            bool directOpen = DirectOpenIfPlain && LooksLikePdf(serverPath);
+            string initialHeader = InspectHeaderHex(serverPath);
+            DebugLogger.Log("INSPECT", "Source file header: " + initialHeader);
+
+            bool isPlainPdf = LooksLikePdf(serverPath);
+            bool directOpen = DirectOpenIfPlain && isPlainPdf;
 
             if (directOpen)
             {
-                EmitProgress(null, "direct_open", "平文PDFのため直接読み込みます", sessionId, serverPath, serverPath, 0.90);
+                EmitProgress(null, "direct_open", "平文PDF (%PDF- 検出) のため直接読み込みます", sessionId, serverPath, serverPath, 0.90);
                 workspaceMode = "direct";
-                byte[] directBytes = File.ReadAllBytes(serverPath);
+                byte[] directBytes = ReadAllBytesShared(serverPath);
                 EmitProgress(null, "ready", "読み込みが完了しました", sessionId, serverPath, serverPath, 1.0);
                 return directBytes;
             }
@@ -178,14 +297,25 @@ namespace PDFDiffStudio
 
             try
             {
-                EmitProgress(logsDir, "prepare", "サーバーファイルを準備しています", sessionId, serverPath, "", 0.05);
+                EmitProgress(logsDir, "prepare", "ローカルワークスペースを準備しています (" + sessionRoot + ")", sessionId, serverPath, "", 0.05);
 
                 string sourceFile = Path.Combine(sourceDir, fileName);
                 string workFile = Path.Combine(workDir, fileName);
 
                 EmitProgress(logsDir, "copy", "暗号化ファイルをローカルワークスペースへコピーしています", sessionId, serverPath, sourceFile, 0.20);
-                File.Copy(serverPath, sourceFile, true);
+                CopyFileShared(serverPath, sourceFile);
                 File.Copy(sourceFile, workFile, true);
+                // 読み取り専用属性が付いているとCLSUClient.exeが上書き復号できない場合があるため属性を標準化
+                try
+                {
+                    File.SetAttributes(workFile, FileAttributes.Normal);
+                }
+                catch (Exception attrEx)
+                {
+                    DebugLogger.Log("WARN", "SetAttributes failed: " + attrEx.Message);
+                }
+
+                DebugLogger.Log("COPY_DONE", "Copied to workFile=" + workFile + " | " + InspectHeaderHex(workFile));
 
                 workspaceMode = "dataclasys";
                 if (IsDataClasysAvailable())
@@ -196,28 +326,57 @@ namespace PDFDiffStudio
                 else if (AllowPlainOpenWithoutClient)
                 {
                     workspaceMode = "plain";
-                    EmitProgress(logsDir, "plain_open", "CLSUClient.exeが見つからないため平文として開きます", sessionId, serverPath, workFile, 0.90);
+                    EmitProgress(logsDir, "plain_open", "CLSUClient.exeが見つからないため復号なしで開きます (" + ClsuClientPath + ")", sessionId, serverPath, workFile, 0.90);
+                    if (!LooksLikePdf(workFile))
+                    {
+                        string errMsg = "ファイルは暗号化（または非PDF形式）されていますが、DataClasysクライアント (" + ClsuClientPath + ") が見つからないため復号できませんでした。先頭バイト: " + InspectHeaderHex(workFile);
+                        DebugLogger.Log("ERROR", errMsg);
+                        throw new InvalidOperationException(errMsg);
+                    }
                 }
                 else
                 {
                     throw new InvalidOperationException("CLSUClient.exe が見つかりません: " + ClsuClientPath);
                 }
 
-                byte[] resultBytes = File.ReadAllBytes(workFile);
-                EmitProgress(logsDir, "ready", "ワークスペースの復号が完了しました", sessionId, serverPath, workFile, 1.0);
+                DebugLogger.Log("READ_WORK", "Reading decrypted workFile: " + InspectHeaderHex(workFile));
+                byte[] resultBytes = ReadAllBytesShared(workFile);
+                EmitProgress(logsDir, "ready", "ワークスペースの復号と読み込みが完了しました", sessionId, serverPath, workFile, 1.0);
                 return resultBytes;
             }
             finally
             {
-                // 閲覧用バイト配列取得後、ローカルの復号済み一時ファイルを確実に削除
                 try
                 {
                     if (Directory.Exists(sessionRoot))
                     {
                         Directory.Delete(sessionRoot, true);
+                        DebugLogger.Log("CLEANUP", "Cleaned up sessionRoot: " + sessionRoot);
                     }
                 }
-                catch { }
+                catch (Exception cleanEx)
+                {
+                    DebugLogger.Log("WARN", "Cleanup failed for " + sessionRoot + ": " + cleanEx.Message);
+                }
+            }
+        }
+
+        private static void CopyFileShared(string src, string dst)
+        {
+            using (FileStream inStream = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (FileStream outStream = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                inStream.CopyTo(outStream);
+            }
+        }
+
+        private static byte[] ReadAllBytesShared(string path)
+        {
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (MemoryStream ms = new MemoryStream())
+            {
+                fs.CopyTo(ms);
+                return ms.ToArray();
             }
         }
 
@@ -229,12 +388,14 @@ namespace PDFDiffStudio
             {
                 FileName = ClsuClientPath,
                 Arguments = "/d \"" + targetPath + "\"",
+                WorkingDirectory = Path.GetDirectoryName(targetPath),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
 
+            DebugLogger.Log("EXEC", "Running: \"" + psi.FileName + "\" " + psi.Arguments);
             Stopwatch sw = Stopwatch.StartNew();
             using (Process proc = Process.Start(psi))
             {
@@ -242,11 +403,15 @@ namespace PDFDiffStudio
                 if (!exited)
                 {
                     try { proc.Kill(); } catch { }
-                    throw new TimeoutException("DataClasys復号コマンドがタイムアウトしました: " + targetPath);
+                    string tMsg = "DataClasys復号コマンドがタイムアウトしました (" + DecryptTimeoutSec + "秒): " + targetPath;
+                    DebugLogger.Log("ERROR", tMsg);
+                    throw new TimeoutException(tMsg);
                 }
                 sw.Stop();
                 string stdout = proc.StandardOutput.ReadToEnd();
                 string stderr = proc.StandardError.ReadToEnd();
+
+                DebugLogger.Log("EXEC_DONE", string.Format("CLSUClient.exe exited with code={0} in {1:F2}s | stdout={2} | stderr={3}", proc.ExitCode, sw.Elapsed.TotalSeconds, stdout.Trim(), stderr.Trim()));
 
                 LogLine(Path.Combine(logsDir, "decrypt_command.log"), "COMMAND: " + psi.FileName + " " + psi.Arguments);
                 LogLine(Path.Combine(logsDir, "decrypt_command.log"), "RETURN CODE: " + proc.ExitCode);
@@ -256,7 +421,9 @@ namespace PDFDiffStudio
 
                 if (proc.ExitCode != 0)
                 {
-                    throw new InvalidOperationException(string.Format("DataClasys復号に失敗しました (rc={0}): {1}", proc.ExitCode, stderr.Trim()));
+                    string errMsg = string.Format("DataClasys復号コマンドがエラー終了しました (rc={0}) target={1} stdout={2} stderr={3}", proc.ExitCode, targetPath, stdout.Trim(), stderr.Trim());
+                    DebugLogger.Log("ERROR", errMsg);
+                    throw new InvalidOperationException(errMsg);
                 }
             }
         }
@@ -268,9 +435,11 @@ namespace PDFDiffStudio
             int stableCount = 0;
             long? lastSize = null;
             string lastHash = null;
+            int pollIter = 0;
 
             while (sw.Elapsed.TotalSeconds < DecryptTimeoutSec)
             {
+                pollIter++;
                 if (!File.Exists(path))
                 {
                     Thread.Sleep(DecryptPollIntervalMs);
@@ -283,8 +452,12 @@ namespace PDFDiffStudio
                     currentSize = new FileInfo(path).Length;
                     currentHash = QuickHash(path);
                 }
-                catch
+                catch (Exception pollEx)
                 {
+                    if (pollIter <= 5 || pollIter % 10 == 0)
+                    {
+                        DebugLogger.Log("WAIT_POLL", "Poll #" + pollIter + " file locked/busy: " + pollEx.Message);
+                    }
                     Thread.Sleep(DecryptPollIntervalMs);
                     continue;
                 }
@@ -298,7 +471,13 @@ namespace PDFDiffStudio
                     stableCount = 0;
                 }
 
-                if (stableCount >= 1 && LooksLikePdf(path))
+                bool isPdf = LooksLikePdf(path);
+                if (pollIter <= 5 || pollIter % 10 == 0 || isPdf)
+                {
+                    DebugLogger.Log("WAIT_POLL", string.Format("Poll #{0}: stableCount={1}, isPdf={2}, {3}", pollIter, stableCount, isPdf, InspectHeaderHex(path)));
+                }
+
+                if (stableCount >= 1 && isPdf)
                 {
                     EmitProgress(logsDir, "decrypt_ready", "復号ファイルの準備が完了しました", sessionId, "", path, 0.90);
                     return;
@@ -309,7 +488,9 @@ namespace PDFDiffStudio
                 Thread.Sleep(DecryptPollIntervalMs);
             }
 
-            throw new TimeoutException("復号完了状態の待機がタイムアウトしました: " + path);
+            string timeoutDetail = "復号完了状態の待機がタイムアウトしました (" + DecryptTimeoutSec + "秒): " + path + " | 最終状態: " + InspectHeaderHex(path);
+            DebugLogger.Log("ERROR", timeoutDetail);
+            throw new TimeoutException(timeoutDetail);
         }
     }
 
@@ -326,6 +507,7 @@ namespace PDFDiffStudio
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            DebugLogger.Log("STARTUP", "PDFDiffStudio starting. BaseDir=" + AppDomain.CurrentDomain.BaseDirectory);
             Manager.CleanupStaleSessions(24);
 
             bool selfTest = false;
@@ -350,12 +532,6 @@ namespace PDFDiffStudio
                         string mode1, name1;
                         byte[] res1 = Manager.OpenAndReadServerPdf(dummyPlain, out mode1, out name1);
                         if (mode1 != "direct" || res1.Length < 5) return 3;
-
-                        string dummyEnc = Path.Combine(testDir, "encrypted.pdf");
-                        File.WriteAllBytes(dummyEnc, Encoding.ASCII.GetBytes("ENCRYPTED_BINARY_HEADER"));
-                        string mode2, name2;
-                        byte[] res2 = Manager.OpenAndReadServerPdf(dummyEnc, out mode2, out name2);
-                        if (res2.Length < 5) return 4;
                     }
                     finally
                     {
@@ -373,22 +549,22 @@ namespace PDFDiffStudio
             Listener.Start();
             int port = ((IPEndPoint)Listener.LocalEndpoint).Port;
             string url = "http://127.0.0.1:" + port + "/";
+            DebugLogger.Log("SERVER", "Listening on " + url);
 
             Thread serverThread = new Thread(ServerLoop) { IsBackground = true };
             serverThread.Start();
 
             LaunchAppWindow(url);
 
-            // クライアントからのハートビートまたは終了通知を監視
             DateTime started = DateTime.UtcNow;
             while (Running)
             {
                 Thread.Sleep(1000);
                 double sinceStart = (DateTime.UtcNow - started).TotalSeconds;
                 double sinceBeat = (DateTime.UtcNow - LastHeartbeat).TotalSeconds;
-                if (sinceStart > 25 && sinceBeat > 20)
+                if (sinceStart > 30 && sinceBeat > 25)
                 {
-                    // ブラウザウィンドウが閉じられたと判断して終了
+                    DebugLogger.Log("SHUTDOWN", "Heartbeat timeout reached, shutting down.");
                     break;
                 }
             }
@@ -407,33 +583,45 @@ namespace PDFDiffStudio
                 @"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
             };
 
+            string profileDir = Path.Combine(Manager.GetAppRoot(), "edge_app_profile");
+            try { Directory.CreateDirectory(profileDir); } catch { }
+
             foreach (string edge in edgeCandidates)
             {
                 if (File.Exists(edge))
                 {
                     try
                     {
+                        string edgeArgs = "--app=\"" + url + "\" --window-size=1500,940 --no-proxy-server --disable-extensions --user-data-dir=\"" + profileDir + "\"";
+                        DebugLogger.Log("LAUNCH", "Starting Edge: " + edge + " " + edgeArgs);
                         Process.Start(new ProcessStartInfo
                         {
                             FileName = edge,
-                            Arguments = "--app=\"" + url + "\" --window-size=1500,940",
+                            Arguments = edgeArgs,
                             UseShellExecute = false
                         });
                         return;
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        DebugLogger.Log("WARN", "Edge launch failed: " + ex.Message);
+                    }
                 }
             }
 
             try
             {
+                DebugLogger.Log("LAUNCH", "Fallback Process.Start: " + url);
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = url,
                     UseShellExecute = true
                 });
             }
-            catch { }
+            catch (Exception ex)
+            {
+                DebugLogger.Log("ERROR", "Fallback launch failed: " + ex.Message);
+            }
         }
 
         private static byte[] LoadIndexHtmlBytes()
@@ -481,8 +669,8 @@ namespace PDFDiffStudio
             using (TcpClient client = (TcpClient)state)
             using (NetworkStream ns = client.GetStream())
             {
-                ns.ReadTimeout = 30000;
-                ns.WriteTimeout = 30000;
+                ns.ReadTimeout = 120000;
+                ns.WriteTimeout = 120000;
                 try
                 {
                     string requestLine = ReadLineAscii(ns);
@@ -530,6 +718,11 @@ namespace PDFDiffStudio
 
                     LastHeartbeat = DateTime.UtcNow;
 
+                    if (pathOnly != "/api/heartbeat" && pathOnly != "/api/progress")
+                    {
+                        DebugLogger.Log("HTTP", method + " " + rawTarget + " (body=" + readTotal + " bytes)");
+                    }
+
                     if (method == "GET" && (pathOnly == "/" || pathOnly == "/index.html"))
                     {
                         byte[] html = LoadIndexHtmlBytes();
@@ -541,11 +734,36 @@ namespace PDFDiffStudio
                     {
                         string json = "{"
                             + "\"ok\":true,"
+                            + "\"server\":\"PDFDiffStudio.exe\","
                             + "\"dataclasys_available\":" + (Manager.IsDataClasysAvailable() ? "true" : "false") + ","
                             + "\"clsu_client_path\":" + JsonQuote(Manager.ClsuClientPath) + ","
+                            + "\"workspace_root\":" + JsonQuote(Manager.GetAppRoot()) + ","
+                            + "\"log_file_path\":" + JsonQuote(DebugLogger.LogFilePath) + ","
                             + "\"app_id\":" + JsonQuote(Manager.AppId)
                             + "}";
                         WriteJson(ns, "200 OK", json);
+                        return;
+                    }
+
+                    if (method == "GET" && pathOnly == "/api/logs")
+                    {
+                        List<string> logs = DebugLogger.GetEntries();
+                        StringBuilder sb = new StringBuilder();
+                        sb.Append("{\"ok\":true,\"log_file_path\":").Append(JsonQuote(DebugLogger.LogFilePath)).Append(",\"logs\":[");
+                        for (int i = 0; i < logs.Count; i++)
+                        {
+                            if (i > 0) sb.Append(',');
+                            sb.Append(JsonQuote(logs[i]));
+                        }
+                        sb.Append("]}");
+                        WriteJson(ns, "200 OK", sb.ToString());
+                        return;
+                    }
+
+                    if (method == "POST" && pathOnly == "/api/logs/clear")
+                    {
+                        DebugLogger.Clear();
+                        WriteJson(ns, "200 OK", "{\"ok\":true}");
                         return;
                     }
 
@@ -581,13 +799,15 @@ namespace PDFDiffStudio
                     if (method == "POST" && pathOnly == "/api/select-file")
                     {
                         string kind = GetQueryParam(query, "kind") ?? "old";
-                        string title = kind == "old" ? "旧版PDFファイルを選択（DataClasys復号対応）" : "新版PDFファイルを選択（DataClasys復号対応）";
+                        string title = kind == "old" ? "旧版PDFファイルを選択" : "新版PDFファイルを選択";
                         string selectedPath = ShowOpenFileDialogSta(title);
                         if (string.IsNullOrEmpty(selectedPath))
                         {
+                            DebugLogger.Log("DIALOG", "File selection cancelled by user (kind=" + kind + ")");
                             WriteJson(ns, "200 OK", "{\"cancelled\":true}");
                             return;
                         }
+                        DebugLogger.Log("DIALOG", "Selected file (kind=" + kind + "): " + selectedPath);
                         try
                         {
                             string mode, fileName;
@@ -604,7 +824,8 @@ namespace PDFDiffStudio
                         }
                         catch (Exception ex)
                         {
-                            WriteJson(ns, "400 Bad Request", "{\"error\":" + JsonQuote(ex.Message) + "}");
+                            DebugLogger.Log("EXCEPTION", "select-file error: " + ex.ToString());
+                            WriteErrorJson(ns, ex);
                         }
                         return;
                     }
@@ -619,6 +840,7 @@ namespace PDFDiffStudio
                             return;
                         }
                         inputPath = inputPath.Trim().Trim('"');
+                        DebugLogger.Log("OPEN_PATH", "Requested path: " + inputPath);
                         try
                         {
                             string mode, fileName;
@@ -635,7 +857,8 @@ namespace PDFDiffStudio
                         }
                         catch (Exception ex)
                         {
-                            WriteJson(ns, "400 Bad Request", "{\"error\":" + JsonQuote(ex.Message) + "}");
+                            DebugLogger.Log("EXCEPTION", "open-path error: " + ex.ToString());
+                            WriteErrorJson(ns, ex);
                         }
                         return;
                     }
@@ -643,16 +866,33 @@ namespace PDFDiffStudio
                     if (method == "POST" && pathOnly == "/api/decrypt-dropped")
                     {
                         string name = GetQueryParam(query, "name") ?? "dropped.pdf";
+                        byte[] rawFileBytes = bodyBytes;
+
+                        // JSON形式 ({ "name": "...", "data_base64": "..." }) で送られた場合にも対応
+                        if (readTotal > 0 && bodyBytes[0] == (byte)'{')
+                        {
+                            string bodyStr = Encoding.UTF8.GetString(bodyBytes, 0, readTotal);
+                            string jsonName = ExtractJsonStringField(bodyStr, "name");
+                            if (!string.IsNullOrEmpty(jsonName)) name = jsonName;
+                            string b64Data = ExtractJsonStringField(bodyStr, "data_base64");
+                            if (!string.IsNullOrEmpty(b64Data))
+                            {
+                                rawFileBytes = Convert.FromBase64String(b64Data);
+                            }
+                        }
+
                         string safeName = Path.GetFileName(name);
                         if (string.IsNullOrEmpty(safeName)) safeName = "dropped.pdf";
                         if (!safeName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) safeName += ".pdf";
 
-                        string tempDir = Path.Combine(Path.GetTempPath(), "dcl_drop_" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                        DebugLogger.Log("DROP", "Received dropped file: name=" + safeName + ", bytes=" + rawFileBytes.Length);
+
+                        string tempDir = Path.Combine(Manager.GetAppRoot(), "dropped_" + Guid.NewGuid().ToString("N").Substring(0, 8));
                         Directory.CreateDirectory(tempDir);
                         string tempFile = Path.Combine(tempDir, safeName);
                         try
                         {
-                            File.WriteAllBytes(tempFile, bodyBytes);
+                            File.WriteAllBytes(tempFile, rawFileBytes);
                             string mode, outName;
                             byte[] pdfBytes = Manager.OpenAndReadServerPdf(tempFile, out mode, out outName);
                             string b64 = Convert.ToBase64String(pdfBytes);
@@ -667,7 +907,8 @@ namespace PDFDiffStudio
                         }
                         catch (Exception ex)
                         {
-                            WriteJson(ns, "400 Bad Request", "{\"error\":" + JsonQuote(ex.Message) + "}");
+                            DebugLogger.Log("EXCEPTION", "decrypt-dropped error: " + ex.ToString());
+                            WriteErrorJson(ns, ex);
                         }
                         finally
                         {
@@ -676,10 +917,35 @@ namespace PDFDiffStudio
                         return;
                     }
 
-                    WriteJson(ns, "404 Not Found", "{\"error\":\"Not found\"}");
+                    DebugLogger.Log("WARN", "404 Not Found: " + method + " " + pathOnly);
+                    WriteJson(ns, "404 Not Found", "{\"error\":\"Endpoint not found: " + pathOnly + "\"}");
                 }
-                catch { }
+                catch (Exception outerEx)
+                {
+                    DebugLogger.Log("HTTP_ERR", "HandleClient exception: " + outerEx.ToString());
+                }
             }
+        }
+
+        private static void WriteErrorJson(NetworkStream ns, Exception ex)
+        {
+            List<string> recentLogs = DebugLogger.GetEntries();
+            StringBuilder logArr = new StringBuilder("[");
+            int start = Math.Max(0, recentLogs.Count - 30);
+            for (int i = start; i < recentLogs.Count; i++)
+            {
+                if (i > start) logArr.Append(',');
+                logArr.Append(JsonQuote(recentLogs[i]));
+            }
+            logArr.Append("]");
+
+            string json = "{"
+                + "\"error\":" + JsonQuote(ex.Message) + ","
+                + "\"detail\":" + JsonQuote(ex.ToString()) + ","
+                + "\"log_file_path\":" + JsonQuote(DebugLogger.LogFilePath) + ","
+                + "\"recent_logs\":" + logArr.ToString()
+                + "}";
+            WriteJson(ns, "400 Bad Request", json);
         }
 
         private static string ShowOpenFileDialogSta(string title)

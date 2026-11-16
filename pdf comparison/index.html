@@ -155,6 +155,11 @@
         <span class="inline-flex items-center gap-1.5 rounded-full glass px-3 py-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-rose-500"></span>削除</span>
         <span class="inline-flex items-center gap-1.5 rounded-full glass px-3 py-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-blue-500"></span>追加</span>
         <span class="inline-flex items-center gap-1.5 rounded-full glass px-3 py-1.5"><span class="h-2.5 w-2.5 rounded-sm bg-slate-300"></span>共通</span>
+        <button id="debugLogBtn" type="button" class="inline-flex items-center gap-1.5 rounded-full glass hover:bg-white/10 px-3 py-1.5 text-slate-300 hover:text-white transition">
+          <svg class="h-3.5 w-3.5 text-violet-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          <span>デバッグログ</span>
+          <span id="debugErrBadge" class="hidden rounded-full bg-rose-500 px-1.5 py-0.2 text-[10px] font-bold text-white">!</span>
+        </button>
       </div>
     </header>
 
@@ -474,6 +479,26 @@
     </div>
   </div>
 
+  <!-- Debug Log Modal -->
+  <div id="debugModal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm grid place-items-center p-4">
+    <div class="glass rounded-2xl max-w-4xl w-full p-5 shadow-2xl border border-white/15 flex flex-col max-h-[88vh]">
+      <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-white/10">
+        <div>
+          <h3 class="text-base font-bold text-white">デバッグ・診断ログ</h3>
+          <p id="debugEnvSummary" class="text-xs text-slate-400 mt-0.5">状態を確認中…</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="debugRefreshBtn" type="button" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-slate-200 transition">更新</button>
+          <button id="debugCopyBtn" type="button" class="px-3 py-1.5 rounded-lg bg-violet-600/80 hover:bg-violet-500 text-xs font-semibold text-white transition">コピー</button>
+          <button id="debugSaveBtn" type="button" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-slate-200 transition">ファイル保存 (.txt)</button>
+          <button id="debugClearBtn" type="button" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-slate-400 hover:text-rose-300 transition">消去</button>
+          <button id="debugCloseBtn" type="button" class="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-medium text-white transition">閉じる</button>
+        </div>
+      </div>
+      <pre id="debugLogOutput" class="mt-3 flex-1 overflow-auto rounded-xl bg-black/60 border border-white/10 p-3.5 text-[11px] leading-relaxed font-mono text-slate-200 whitespace-pre-wrap select-text scroll-thin"></pre>
+    </div>
+  </div>
+
   <!-- Toast -->
   <div id="toast" class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 rounded-xl px-4 py-3 text-sm shadow-2xl ring-1"></div>
 
@@ -500,7 +525,14 @@
 
     /* ---------- State ---------- */
     const state = {
-      backend: { available: false, dataclasysAvailable: false, clsuPath: '' },
+      backend: {
+        available: false,
+        server: '',
+        dataclasysAvailable: false,
+        clsuPath: '',
+        workspaceRoot: '',
+        logFilePath: '',
+      },
       old: { doc: null, name: '', size: 0, mode: '', serverPath: '' },
       new: { doc: null, name: '', size: 0, mode: '', serverPath: '' },
       page: 1,
@@ -528,11 +560,17 @@
         newPt2: null,
       },
       pathModalKind: 'old',
+      frontendLogs: [],
+      backendLogs: [],
     };
 
     /* ---------- DOM ---------- */
     const $ = (id) => document.getElementById(id);
     const el = {
+      debugLogBtn: $('debugLogBtn'), debugErrBadge: $('debugErrBadge'),
+      debugModal: $('debugModal'), debugEnvSummary: $('debugEnvSummary'), debugLogOutput: $('debugLogOutput'),
+      debugRefreshBtn: $('debugRefreshBtn'), debugCopyBtn: $('debugCopyBtn'), debugSaveBtn: $('debugSaveBtn'),
+      debugClearBtn: $('debugClearBtn'), debugCloseBtn: $('debugCloseBtn'),
       oldFile: $('oldFile'), newFile: $('newFile'),
       oldDrop: $('oldDrop'), newDrop: $('newDrop'),
       oldName: $('oldName'), newName: $('newName'),
@@ -566,6 +604,185 @@
     };
     const canvases = { diff: el.diffCanvas, old: el.oldCanvas, new: el.newCanvas };
 
+    /* ---------- Debug Logging System ---------- */
+    function nowTimeStr() {
+      const d = new Date();
+      return d.toISOString().replace('T', ' ').slice(0, 23);
+    }
+
+    function addDebugLog(level, category, msg, extra = '') {
+      const line = `[${nowTimeStr()}] [FE:${level}:${category}] ${msg}${extra ? '\n' + extra : ''}`;
+      state.frontendLogs.push(line);
+      if (state.frontendLogs.length > 500) state.frontendLogs.shift();
+      if (level === 'ERROR') {
+        el.debugErrBadge.classList.remove('hidden');
+      }
+      if (!el.debugModal.classList.contains('hidden')) {
+        renderDebugModalContent();
+      }
+    }
+
+    function inspectBytesHeader(u8, maxBytes = 16) {
+      if (!u8 || !u8.length) return 'empty (0 bytes)';
+      const n = Math.min(maxBytes, u8.length);
+      const hex = [];
+      let ascii = '';
+      for (let i = 0; i < n; i++) {
+        hex.push(u8[i].toString(16).padStart(2, '0').toUpperCase());
+        const c = u8[i];
+        ascii += (c >= 32 && c < 127) ? String.fromCharCode(c) : '.';
+      }
+      return `size=${u8.byteLength} bytes, hex=[${hex.join(' ')}], ascii=[${ascii}]`;
+    }
+
+    async function refreshBackendLogs() {
+      if (!state.backend.available) return;
+      try {
+        const res = await fetch('/api/logs', { cache: 'no-store' });
+        const txt = await res.text();
+        const data = JSON.parse(txt);
+        if (data && Array.isArray(data.logs)) {
+          state.backendLogs = data.logs;
+        }
+        if (data && data.log_file_path) {
+          state.backend.logFilePath = data.log_file_path;
+        }
+      } catch (e) {
+        addDebugLog('WARN', 'LOGS', 'バックエンドログ取得失敗: ' + (e.message || e));
+      }
+    }
+
+    function buildFullDebugReport() {
+      const lines = [];
+      lines.push('=== PDF Diff Studio 診断レポート ===');
+      lines.push(`生成日時: ${new Date().toLocaleString('ja-JP')}`);
+      lines.push(`URL: ${window.location.href}`);
+      lines.push(`バックエンド接続: ${state.backend.available ? '有効 (' + (state.backend.server || 'local') + ')' : '未接続（ブラウザ単体動作）'}`);
+      lines.push(`CLSUClient検出: ${state.backend.dataclasysAvailable ? 'あり' : 'なし'} (${state.backend.clsuPath || '未確認'})`);
+      lines.push(`ワークスペース: ${state.backend.workspaceRoot || '未確認'}`);
+      lines.push(`ログファイル保存先: ${state.backend.logFilePath || 'なし'}`);
+      lines.push('');
+      lines.push('--- フロントエンドログ ---');
+      if (state.frontendLogs.length === 0) {
+        lines.push('(記録なし)');
+      } else {
+        lines.push(...state.frontendLogs);
+      }
+      lines.push('');
+      lines.push('--- バックエンドログ (DataClasys / ファイル処理) ---');
+      if (state.backendLogs.length === 0) {
+        lines.push('(記録なし)');
+      } else {
+        lines.push(...state.backendLogs);
+      }
+      return lines.join('\n');
+    }
+
+    function renderDebugModalContent() {
+      el.debugEnvSummary.textContent = state.backend.available
+        ? `バックエンド: ${state.backend.server || '接続済'} | CLSUClient: ${state.backend.dataclasysAvailable ? '検出済' : '未検出'} | ログ保存先: ${state.backend.logFilePath || 'メモリ'}`
+        : `バックエンド未接続（URL: ${window.location.href}）※DataClasys復号には PDFDiffStudio.exe から起動してください`;
+      el.debugLogOutput.textContent = buildFullDebugReport();
+      el.debugLogOutput.scrollTop = el.debugLogOutput.scrollHeight;
+    }
+
+    async function openDebugModal() {
+      el.debugErrBadge.classList.add('hidden');
+      el.debugModal.classList.remove('hidden');
+      renderDebugModalContent();
+      await refreshBackendLogs();
+      renderDebugModalContent();
+    }
+
+    el.debugLogBtn.addEventListener('click', () => openDebugModal());
+    el.debugCloseBtn.addEventListener('click', () => el.debugModal.classList.add('hidden'));
+    el.debugRefreshBtn.addEventListener('click', async () => {
+      await refreshBackendLogs();
+      renderDebugModalContent();
+    });
+    el.debugCopyBtn.addEventListener('click', async () => {
+      const text = buildFullDebugReport();
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('デバッグログをクリップボードにコピーしました', 'success');
+      } catch (_) {
+        toast('コピーに失敗しました。テキストを選択してコピーしてください', 'error');
+      }
+    });
+    el.debugSaveBtn.addEventListener('click', () => {
+      const text = buildFullDebugReport();
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `pdf_diff_debug_${Date.now()}.txt`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
+    el.debugClearBtn.addEventListener('click', async () => {
+      state.frontendLogs = [];
+      state.backendLogs = [];
+      if (state.backend.available) {
+        await fetch('/api/logs/clear', { method: 'POST' }).catch(() => {});
+      }
+      renderDebugModalContent();
+    });
+
+    window.addEventListener('error', (ev) => {
+      addDebugLog('ERROR', 'WINDOW', `${ev.message} (${ev.filename}:${ev.lineno})`);
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+      addDebugLog('ERROR', 'PROMISE', String(ev.reason));
+    });
+
+    /* ---------- Safe API Fetch Helper ---------- */
+    async function fetchApiJson(url, options = {}, contextLabel = 'API') {
+      const method = options.method || 'GET';
+      addDebugLog('INFO', contextLabel, `Request: ${method} ${url}`);
+      let res;
+      try {
+        res = await fetch(url, options);
+      } catch (netErr) {
+        addDebugLog('ERROR', contextLabel, `Network error on ${method} ${url}: ${netErr.message || netErr}`);
+        throw new Error(`通信エラー (${contextLabel}): バックエンドへ接続できませんでした (${netErr.message || netErr})`);
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      const rawText = await res.text();
+      addDebugLog('INFO', contextLabel, `Response: HTTP ${res.status} (${contentType}, ${rawText.length} chars)`);
+
+      let data = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch (parseErr) {
+        const preview = rawText.slice(0, 1200);
+        // HTMLタイトルや本文の抽出を試みる
+        const titleMatch = rawText.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        const htmlTitle = titleMatch ? titleMatch[1].trim() : '';
+        addDebugLog(
+          'ERROR',
+          contextLabel,
+          `JSONパース失敗 (HTTP ${res.status}, Content-Type: ${contentType})${htmlTitle ? ' [HTML Title: ' + htmlTitle + ']' : ''}`,
+          `--- 受信した生レスポンス (先頭1200文字) ---\n${preview}`
+        );
+        throw new Error(
+          `サーバーまたはプロキシからJSON以外の応答 (HTTP ${res.status}${htmlTitle ? ': ' + htmlTitle : ''}) が返されました。右上の「デバッグログ」から詳細を確認できます。`
+        );
+      }
+
+      if (data && Array.isArray(data.recent_logs)) {
+        state.backendLogs = data.recent_logs;
+      }
+
+      if (!res.ok || (data && data.error)) {
+        const errMsg = (data && data.error) ? data.error : `HTTP ${res.status} エラー`;
+        const errDetail = (data && data.detail) ? data.detail : '';
+        addDebugLog('ERROR', contextLabel, `Backend error: ${errMsg}`, errDetail);
+        throw new Error(errMsg);
+      }
+
+      return data;
+    }
+
     /* ---------- Utils ---------- */
     let toastTimer = null;
     function toast(msg, type = 'info') {
@@ -574,10 +791,10 @@
         error: 'bg-rose-950/95 text-rose-100 ring-rose-500/40',
         success: 'bg-emerald-950/95 text-emerald-100 ring-emerald-500/40',
       };
-      el.toast.className = `fixed bottom-6 left-1/2 z-50 rounded-xl px-4 py-3 text-sm shadow-2xl ring-1 toast-enter ${styles[type]}`;
+      el.toast.className = `fixed bottom-6 left-1/2 z-50 rounded-xl px-4 py-3 text-sm shadow-2xl ring-1 toast-enter max-w-2xl ${styles[type]}`;
       el.toast.textContent = msg;
       clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => el.toast.classList.add('hidden'), 3800);
+      toastTimer = setTimeout(() => el.toast.classList.add('hidden'), type === 'error' ? 6500 : 3800);
     }
     const fmt = (n) => n.toLocaleString('ja-JP');
     function showLoading(on, text = 'レンダリング中…', subText = '') {
@@ -609,25 +826,35 @@
       }
     }
 
+    let heartbeatStarted = false;
     async function checkBackendStatus() {
       try {
-        const res = await fetch('/api/status', { cache: 'no-store' });
-        if (!res.ok) return;
-        const data = await res.json();
-        state.backend.available = true;
-        state.backend.dataclasysAvailable = !!data.dataclasys_available;
-        state.backend.clsuPath = data.clsu_client_path || '';
-        el.oldPathBtn.classList.remove('hidden');
-        el.newPathBtn.classList.remove('hidden');
-        setInterval(() => {
-          fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
-        }, 4000);
-        window.addEventListener('pagehide', () => {
-          if (navigator.sendBeacon) navigator.sendBeacon('/api/shutdown', '');
-        });
-      } catch (_) {
+        const data = await fetchApiJson('/api/status', { cache: 'no-store' }, 'STATUS');
+        if (data && data.ok) {
+          state.backend.available = true;
+          state.backend.server = data.server || 'local';
+          state.backend.dataclasysAvailable = !!data.dataclasys_available;
+          state.backend.clsuPath = data.clsu_client_path || '';
+          state.backend.workspaceRoot = data.workspace_root || '';
+          state.backend.logFilePath = data.log_file_path || '';
+          el.oldPathBtn.classList.remove('hidden');
+          el.newPathBtn.classList.remove('hidden');
+          if (!heartbeatStarted) {
+            heartbeatStarted = true;
+            setInterval(() => {
+              fetch('/api/heartbeat', { method: 'POST' }).catch(() => {});
+            }, 4000);
+            window.addEventListener('pagehide', () => {
+              if (navigator.sendBeacon) navigator.sendBeacon('/api/shutdown', '');
+            });
+          }
+          return true;
+        }
+      } catch (err) {
         state.backend.available = false;
+        addDebugLog('WARN', 'STATUS', 'バックエンド未接続（ブラウザ単体モード）: ' + (err.message || err));
       }
+      return false;
     }
     checkBackendStatus();
 
@@ -639,15 +866,32 @@
       return bytes;
     }
 
+    function uint8ArrayToBase64(u8) {
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let i = 0; i < u8.length; i += chunkSize) {
+        const sub = u8.subarray(i, i + chunkSize);
+        binary += String.fromCharCode.apply(null, sub);
+      }
+      return btoa(binary);
+    }
+
     function looksLikePlainPdfBytes(u8) {
       if (!u8 || u8.length < 5) return false;
-      return u8[0] === 0x25 && u8[1] === 0x50 && u8[2] === 0x44 && u8[3] === 0x46 && u8[4] === 0x2D;
+      const limit = Math.min(1024, u8.length - 5);
+      for (let i = 0; i <= limit; i++) {
+        if (u8[i] === 0x25 && u8[i + 1] === 0x50 && u8[i + 2] === 0x44 && u8[i + 3] === 0x46 && u8[i + 4] === 0x2D) {
+          return true; // %PDF-
+        }
+      }
+      return false;
     }
 
     async function loadPdfFromBytes(kind, u8Array, fileName, fileSize, modeLabel, serverPath = '') {
       const slot = state[kind];
       const metaEl = el[kind + 'Meta'];
       metaEl.textContent = '読み込み中…';
+      addDebugLog('INFO', 'PDF_PARSE', `Loading into PDF.js (${kind}): name=${fileName}, mode=${modeLabel}, ${inspectBytesHeader(u8Array)}`);
       try {
         const doc = await pdfjsLib.getDocument({
           data: u8Array,
@@ -666,11 +910,13 @@
         state.pageAlignments = {};
         resetAlignParams(false);
         updateControls();
+        addDebugLog('INFO', 'PDF_READY', `Successfully loaded ${fileName} (${doc.numPages} pages)`);
         toast(`${kind === 'old' ? '旧版' : '新版'}を読み込みました（${doc.numPages} ページ）`, 'success');
       } catch (err) {
         console.error(err);
         metaEl.textContent = '読み込みエラー';
-        toast('PDFの読み込みに失敗しました: ' + (err.message || err), 'error');
+        addDebugLog('ERROR', 'PDF_PARSE', `PDF.js getDocument failed for ${fileName}: ${err.message || err}`, `Header: ${inspectBytesHeader(u8Array)}`);
+        toast('PDFの解析に失敗しました（デバッグログ参照）: ' + (err.message || err), 'error');
       }
     }
 
@@ -678,20 +924,18 @@
       showLoading(true, `${kind === 'old' ? '旧版' : '新版'}PDFを選択中…`, '');
       startProgressPolling();
       try {
-        const res = await fetch(`/api/select-file?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
-        const data = await res.json();
+        const data = await fetchApiJson(`/api/select-file?kind=${encodeURIComponent(kind)}`, { method: 'POST' }, 'SELECT_FILE');
         if (data.cancelled) {
+          addDebugLog('INFO', 'SELECT_FILE', `Cancelled by user (${kind})`);
           showLoading(false);
           return;
-        }
-        if (!res.ok || data.error) {
-          throw new Error(data.error || 'ファイルの読み込みに失敗しました');
         }
         const bytes = base64ToUint8Array(data.pdf_base64);
         await loadPdfFromBytes(kind, bytes, data.file_name, data.file_size, data.workspace_mode, data.server_path);
       } catch (err) {
         console.error(err);
-        toast(err.message || String(err), 'error');
+        await refreshBackendLogs();
+        toast('読み込みエラー: ' + (err.message || String(err)), 'error');
       } finally {
         stopProgressPolling();
         showLoading(false);
@@ -703,20 +947,21 @@
       showLoading(true, 'ファイルを読み込み中…', serverPath);
       startProgressPolling();
       try {
-        const res = await fetch('/api/open-path', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind, path: serverPath.trim() }),
-        });
-        const data = await res.json();
-        if (!res.ok || data.error) {
-          throw new Error(data.error || '指定パスのオープンに失敗しました');
-        }
+        const data = await fetchApiJson(
+          '/api/open-path',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind, path: serverPath.trim() }),
+          },
+          'OPEN_PATH'
+        );
         const bytes = base64ToUint8Array(data.pdf_base64);
         await loadPdfFromBytes(kind, bytes, data.file_name, data.file_size, data.workspace_mode, data.server_path);
       } catch (err) {
         console.error(err);
-        toast(err.message || String(err), 'error');
+        await refreshBackendLogs();
+        toast('読み込みエラー: ' + (err.message || String(err)), 'error');
       } finally {
         stopProgressPolling();
         showLoading(false);
@@ -729,35 +974,60 @@
         toast('PDFファイルを選択してください。', 'error');
         return;
       }
-      const rawBuf = new Uint8Array(await file.arrayBuffer());
-      const isPlain = looksLikePlainPdfBytes(rawBuf);
 
-      if (!isPlain && state.backend.available) {
-        showLoading(true, 'ファイルを読み込み中…', file.name);
-        startProgressPolling();
-        try {
-          const res = await fetch(`/api/decrypt-dropped?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(file.name)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: rawBuf,
-          });
-          const data = await res.json();
-          if (!res.ok || data.error) {
-            throw new Error(data.error || 'ファイルの復号に失敗しました');
-          }
-          const decBytes = base64ToUint8Array(data.pdf_base64);
-          await loadPdfFromBytes(kind, decBytes, file.name, decBytes.byteLength, data.workspace_mode || 'dataclasys', file.name);
-        } catch (err) {
-          console.error(err);
-          toast('読み込みエラー: ' + (err.message || err), 'error');
-        } finally {
-          stopProgressPolling();
-          showLoading(false);
-        }
+      let rawBuf;
+      try {
+        rawBuf = new Uint8Array(await file.arrayBuffer());
+      } catch (readErr) {
+        addDebugLog('ERROR', 'FILE_READ', `ブラウザによるファイル読み取り失敗 (${file.name}): ${readErr.message || readErr}`);
+        toast('ブラウザからファイルを読み取れませんでした。枠をクリックしてファイル選択ダイアログから開いてください。', 'error');
         return;
       }
 
-      await loadPdfFromBytes(kind, rawBuf, file.name, file.size, isPlain ? 'direct' : 'local', file.name);
+      const isPlain = looksLikePlainPdfBytes(rawBuf);
+      addDebugLog('INFO', 'FILE_INPUT', `File input (${kind}): name=${file.name}, isPlainPdf=${isPlain}, ${inspectBytesHeader(rawBuf)}`);
+
+      if (!isPlain) {
+        if (!state.backend.available) {
+          await checkBackendStatus();
+        }
+        if (state.backend.available) {
+          showLoading(true, '暗号化ファイルをローカルワークスペースで復号中…', file.name);
+          startProgressPolling();
+          try {
+            const payload = JSON.stringify({
+              kind,
+              name: file.name,
+              data_base64: uint8ArrayToBase64(rawBuf),
+            });
+            const data = await fetchApiJson(
+              `/api/decrypt-dropped?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(file.name)}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: payload,
+              },
+              'DECRYPT_DROP'
+            );
+            const decBytes = base64ToUint8Array(data.pdf_base64);
+            await loadPdfFromBytes(kind, decBytes, file.name, decBytes.byteLength, data.workspace_mode || 'dataclasys', file.name);
+          } catch (err) {
+            console.error(err);
+            await refreshBackendLogs();
+            toast('読み込みエラー: ' + (err.message || err) + ' （クリックしてダイアログからの選択もお試しください）', 'error');
+          } finally {
+            stopProgressPolling();
+            showLoading(false);
+          }
+          return;
+        } else {
+          addDebugLog('ERROR', 'DATACLASYS', `暗号化ファイル (${file.name}) が選択されましたが、バックエンド (PDFDiffStudio.exe) に接続されていません。Header: ${inspectBytesHeader(rawBuf)}`);
+          toast('DataClasysで保護されたファイルです。復号して読み込むには PDFDiffStudio.exe から起動してください（詳細はデバッグログ参照）。', 'error');
+          return;
+        }
+      }
+
+      await loadPdfFromBytes(kind, rawBuf, file.name, file.size, 'direct', file.name);
     }
 
     function updateFileLabels() {
@@ -777,8 +1047,11 @@
       const input = el[kind + 'File'];
       const pathBtn = el[kind + 'PathBtn'];
 
-      zone.addEventListener('click', (e) => {
+      zone.addEventListener('click', async (e) => {
         if (e.target.closest('button')) return;
+        if (!state.backend.available) {
+          await checkBackendStatus();
+        }
         if (state.backend.available) {
           selectFileViaBackend(kind);
         } else {
@@ -1020,6 +1293,7 @@
         applyZoom();
       } catch (err) {
         console.error(err);
+        addDebugLog('ERROR', 'RENDER', `ページ ${state.page} のレンダリング失敗: ${err.message || err}`);
         toast('レンダリングに失敗しました: ' + (err.message || err), 'error');
       } finally {
         if (seq === state.seq) showLoading(false);
@@ -2034,10 +2308,16 @@
 
     document.addEventListener('keydown', (e) => {
       if (e.target.matches('input, select, textarea')) return;
-      if (e.key === 'Escape' && state.picking.active) {
-        cancelPickMode();
-        setTab('diff');
-        return;
+      if (e.key === 'Escape') {
+        if (!el.debugModal.classList.contains('hidden')) {
+          el.debugModal.classList.add('hidden');
+          return;
+        }
+        if (state.picking.active) {
+          cancelPickMode();
+          setTab('diff');
+          return;
+        }
       }
       switch (e.key) {
         case 'ArrowLeft': case 'PageUp': goTo(state.page - 1); e.preventDefault(); break;
