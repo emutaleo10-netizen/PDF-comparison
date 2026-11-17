@@ -1,10 +1,12 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -27,6 +29,7 @@ namespace PDFDiffStudio
         private static readonly object _lock = new object();
         private static readonly List<string> _entries = new List<string>();
         private static string _logFilePath = null;
+        public static Action OnLogAdded;
 
         public static string LogFilePath
         {
@@ -64,6 +67,12 @@ namespace PDFDiffStudio
                 }
                 catch { }
             }
+            try
+            {
+                Action cb = OnLogAdded;
+                if (cb != null) cb();
+            }
+            catch { }
         }
 
         public static List<string> GetEntries()
@@ -80,6 +89,12 @@ namespace PDFDiffStudio
             {
                 _entries.Clear();
             }
+            try
+            {
+                Action cb = OnLogAdded;
+                if (cb != null) cb();
+            }
+            catch { }
         }
     }
 
@@ -96,6 +111,7 @@ namespace PDFDiffStudio
 
         private readonly object _sync = new object();
         public ProgressState LatestProgress = new ProgressState();
+        public Action OnProgressChanged;
 
         public DataClasysNativeManager()
         {
@@ -181,6 +197,12 @@ namespace PDFDiffStudio
             {
                 LogLine(Path.Combine(logsDir, "events.log"), stage + ": " + message);
             }
+            try
+            {
+                Action cb = OnProgressChanged;
+                if (cb != null) cb();
+            }
+            catch { }
         }
 
         private static void LogLine(string path, string message)
@@ -197,7 +219,7 @@ namespace PDFDiffStudio
         {
             try
             {
-                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
                     int len = (int)Math.Min(maxBytes, fs.Length);
                     byte[] buf = new byte[len];
@@ -224,7 +246,7 @@ namespace PDFDiffStudio
         {
             try
             {
-                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                 {
                     if (fs.Length < 5) return false;
                     int checkLen = (int)Math.Min(1024, fs.Length);
@@ -248,7 +270,7 @@ namespace PDFDiffStudio
 
         private static string QuickHash(string path)
         {
-            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 byte[] buf = new byte[65536];
                 int n = fs.Read(buf, 0, buf.Length);
@@ -305,7 +327,6 @@ namespace PDFDiffStudio
                 EmitProgress(logsDir, "copy", "暗号化ファイルをローカルワークスペースへコピーしています", sessionId, serverPath, sourceFile, 0.20);
                 CopyFileShared(serverPath, sourceFile);
                 File.Copy(sourceFile, workFile, true);
-                // 読み取り専用属性が付いているとCLSUClient.exeが上書き復号できない場合があるため属性を標準化
                 try
                 {
                     File.SetAttributes(workFile, FileAttributes.Normal);
@@ -496,10 +517,29 @@ namespace PDFDiffStudio
 
     internal static class Program
     {
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+
         private static readonly DataClasysNativeManager Manager = new DataClasysNativeManager();
-        private static DateTime LastHeartbeat = DateTime.UtcNow;
         private static volatile bool Running = true;
-        private static TcpListener Listener;
+        private static readonly object BridgeLock = new object();
+        private static string BridgeDir = "";
+        private static string LastSelectedDir = "";
+        private static string LastAckCmdId = "";
+        private static int StatusSeq = 1;
+        private static int OldPayloadSeq = 0;
+        private static int NewPayloadSeq = 0;
+        private static int ErrorSeq = 0;
+        private static string LastErrorMsg = "";
+        private static volatile bool IsBusy = false;
 
         [STAThread]
         private static int Main(string[] args)
@@ -507,7 +547,8 @@ namespace PDFDiffStudio
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            DebugLogger.Log("STARTUP", "PDFDiffStudio starting. BaseDir=" + AppDomain.CurrentDomain.BaseDirectory);
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            DebugLogger.Log("STARTUP", "PDFDiffStudio starting (Zero-HTTP File Bridge mode). BaseDir=" + baseDir);
             Manager.CleanupStaleSessions(24);
 
             bool selfTest = false;
@@ -516,14 +557,21 @@ namespace PDFDiffStudio
                 if (a == "--self-test") selfTest = true;
             }
 
+            string htmlPath = EnsureHtmlAndBridgeDir(baseDir);
+            DebugLogger.Log("BRIDGE", "HTML path=" + htmlPath + " | BridgeDir=" + BridgeDir);
+
+            Manager.OnProgressChanged = WriteBridgeStatus;
+            DebugLogger.OnLogAdded = WriteBridgeStatus;
+            WriteBridgeStatus();
+
             if (selfTest)
             {
                 try
                 {
-                    byte[] htmlBytes = LoadIndexHtmlBytes();
-                    if (htmlBytes == null || htmlBytes.Length < 1000) return 2;
+                    if (!File.Exists(htmlPath)) return 2;
+                    if (!File.Exists(Path.Combine(BridgeDir, "status.js"))) return 3;
 
-                    string testDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "_selftest_tmp");
+                    string testDir = Path.Combine(baseDir, "_selftest_tmp");
                     Directory.CreateDirectory(testDir);
                     try
                     {
@@ -531,7 +579,7 @@ namespace PDFDiffStudio
                         File.WriteAllBytes(dummyPlain, Encoding.ASCII.GetBytes("%PDF-1.4 dummy"));
                         string mode1, name1;
                         byte[] res1 = Manager.OpenAndReadServerPdf(dummyPlain, out mode1, out name1);
-                        if (mode1 != "direct" || res1.Length < 5) return 3;
+                        if (mode1 != "direct" || res1.Length < 5) return 4;
                     }
                     finally
                     {
@@ -545,36 +593,406 @@ namespace PDFDiffStudio
                 }
             }
 
-            Listener = new TcpListener(IPAddress.Loopback, 0);
-            Listener.Start();
-            int port = ((IPEndPoint)Listener.LocalEndpoint).Port;
-            string url = "http://127.0.0.1:" + port + "/";
-            DebugLogger.Log("SERVER", "Listening on " + url);
+            LaunchAppWindowFileMode(htmlPath);
 
-            Thread serverThread = new Thread(ServerLoop) { IsBackground = true };
-            serverThread.Start();
-
-            LaunchAppWindow(url);
-
+            // Win32 ウィンドウタイトル監視ループ（HTTP通信を一切使わずにコマンド受信＆生存確認）
             DateTime started = DateTime.UtcNow;
+            DateTime lastSeenWindow = DateTime.UtcNow;
+            bool everSawWindow = false;
+            HashSet<string> processedCmds = new HashSet<string>();
+
             while (Running)
             {
-                Thread.Sleep(1000);
-                double sinceStart = (DateTime.UtcNow - started).TotalSeconds;
-                double sinceBeat = (DateTime.UtcNow - LastHeartbeat).TotalSeconds;
-                if (sinceStart > 30 && sinceBeat > 25)
+                Thread.Sleep(120);
+                List<string> titles = GetPdfDiffWindowTitles();
+                if (titles.Count > 0)
                 {
-                    DebugLogger.Log("SHUTDOWN", "Heartbeat timeout reached, shutting down.");
-                    break;
+                    everSawWindow = true;
+                    lastSeenWindow = DateTime.UtcNow;
+                }
+                else
+                {
+                    double sinceStart = (DateTime.UtcNow - started).TotalSeconds;
+                    double sinceSeen = (DateTime.UtcNow - lastSeenWindow).TotalSeconds;
+                    if (everSawWindow && sinceSeen > 5.0)
+                    {
+                        DebugLogger.Log("SHUTDOWN", "Viewer window closed by user. Exiting.");
+                        break;
+                    }
+                    if (!everSawWindow && sinceStart > 60.0)
+                    {
+                        DebugLogger.Log("SHUTDOWN", "Viewer window never detected within 60s. Exiting.");
+                        break;
+                    }
+                }
+
+                foreach (string title in titles)
+                {
+                    int cmdStart = title.IndexOf("__CMD__:", StringComparison.Ordinal);
+                    int cmdEnd = title.IndexOf(":__END__", StringComparison.Ordinal);
+                    if (cmdStart >= 0 && cmdEnd > cmdStart + 8)
+                    {
+                        string payload = title.Substring(cmdStart + 8, cmdEnd - (cmdStart + 8));
+                        // フォーマット: cmdId:cmdType:kind:size:argBase64
+                        string[] parts = payload.Split(new char[] { ':' }, 5);
+                        if (parts.Length >= 5)
+                        {
+                            string cmdId = parts[0];
+                            string cmdType = parts[1];
+                            string kind = parts[2];
+                            long expectedSize = 0;
+                            long.TryParse(parts[3], out expectedSize);
+                            string argB64 = parts[4];
+
+                            if (!processedCmds.Contains(cmdId))
+                            {
+                                processedCmds.Add(cmdId);
+                                LastAckCmdId = cmdId;
+                                WriteBridgeStatus();
+                                ThreadPool.QueueUserWorkItem(_ => ExecuteBridgeCommand(cmdId, cmdType, kind, expectedSize, argB64));
+                            }
+                        }
+                    }
                 }
             }
 
-            try { Listener.Stop(); } catch { }
+            CleanupBridgeFiles();
             return 0;
         }
 
-        private static void LaunchAppWindow(string url)
+        private static string EnsureHtmlAndBridgeDir(string baseDir)
         {
+            string htmlPath = Path.Combine(baseDir, "index.html");
+            try
+            {
+                if (!File.Exists(htmlPath))
+                {
+                    byte[] embedded = LoadEmbeddedHtmlBytes();
+                    File.WriteAllBytes(htmlPath, embedded);
+                }
+                BridgeDir = Path.Combine(baseDir, ".bridge");
+                Directory.CreateDirectory(BridgeDir);
+                return htmlPath;
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log("WARN", "BaseDir not writable, using AppRoot for HTML & Bridge: " + ex.Message);
+                string fallbackDir = Path.Combine(Manager.GetAppRoot(), "ui_host");
+                Directory.CreateDirectory(fallbackDir);
+                htmlPath = Path.Combine(fallbackDir, "index.html");
+                File.WriteAllBytes(htmlPath, LoadEmbeddedHtmlBytes());
+                BridgeDir = Path.Combine(fallbackDir, ".bridge");
+                Directory.CreateDirectory(BridgeDir);
+                return htmlPath;
+            }
+        }
+
+        private static void CleanupBridgeFiles()
+        {
+            try
+            {
+                string pOld = Path.Combine(BridgeDir, "payload_old.js");
+                string pNew = Path.Combine(BridgeDir, "payload_new.js");
+                if (File.Exists(pOld)) File.Delete(pOld);
+                if (File.Exists(pNew)) File.Delete(pNew);
+            }
+            catch { }
+        }
+
+        private static void ExecuteBridgeCommand(string cmdId, string cmdType, string kind, long expectedSize, string argB64)
+        {
+            string argText = "";
+            if (!string.IsNullOrEmpty(argB64))
+            {
+                try
+                {
+                    argText = Encoding.UTF8.GetString(Convert.FromBase64String(argB64));
+                }
+                catch { argText = argB64; }
+            }
+
+            DebugLogger.Log("CMD", string.Format("Received command id={0} type={1} kind={2} size={3} arg={4}", cmdId, cmdType, kind, expectedSize, argText));
+
+            if (cmdType == "CLEARLOGS")
+            {
+                DebugLogger.Clear();
+                WriteBridgeStatus();
+                return;
+            }
+
+            if (IsBusy)
+            {
+                DebugLogger.Log("WARN", "Command ignored because another file operation is currently busy.");
+                return;
+            }
+
+            IsBusy = true;
+            WriteBridgeStatus();
+
+            try
+            {
+                if (cmdType == "SELECT")
+                {
+                    string title = kind == "old" ? "旧版PDFファイルを選択" : "新版PDFファイルを選択";
+                    string selectedPath = ShowOpenFileDialogSta(title, null);
+                    if (string.IsNullOrEmpty(selectedPath))
+                    {
+                        DebugLogger.Log("DIALOG", "File selection cancelled by user (kind=" + kind + ")");
+                        return;
+                    }
+                    LastSelectedDir = Path.GetDirectoryName(selectedPath);
+                    ProcessAndPublishPdf(kind, selectedPath);
+                }
+                else if (cmdType == "OPENPATH")
+                {
+                    string inputPath = (argText ?? "").Trim().Trim('"');
+                    if (string.IsNullOrEmpty(inputPath))
+                    {
+                        throw new InvalidOperationException("ファイルパスが空です。");
+                    }
+                    LastSelectedDir = Path.GetDirectoryName(inputPath);
+                    ProcessAndPublishPdf(kind, inputPath);
+                }
+                else if (cmdType == "DROP")
+                {
+                    string fileName = Path.GetFileName(argText);
+                    DebugLogger.Log("DROP_CMD", "Attempting to locate dropped encrypted file: name=" + fileName + ", expectedSize=" + expectedSize);
+                    string resolvedPath = ResolveDroppedFilePath(fileName, expectedSize);
+                    if (!string.IsNullOrEmpty(resolvedPath))
+                    {
+                        DebugLogger.Log("DROP_RESOLVED", "Automatically located dropped file at: " + resolvedPath);
+                    }
+                    else
+                    {
+                        DebugLogger.Log("DROP_DIALOG", "Could not auto-locate folder from Explorer; prompting OpenFileDialog for: " + fileName);
+                        string title = (kind == "old" ? "【旧版】" : "【新版】") + "復号のためドロップされたファイルを選択してください: " + fileName;
+                        resolvedPath = ShowOpenFileDialogSta(title, fileName);
+                    }
+
+                    if (string.IsNullOrEmpty(resolvedPath))
+                    {
+                        DebugLogger.Log("DROP_CANCEL", "User cancelled file location dialog for dropped file.");
+                        return;
+                    }
+                    LastSelectedDir = Path.GetDirectoryName(resolvedPath);
+                    ProcessAndPublishPdf(kind, resolvedPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log("EXCEPTION", ex.ToString());
+                LastErrorMsg = ex.Message;
+                ErrorSeq++;
+            }
+            finally
+            {
+                IsBusy = false;
+                WriteBridgeStatus();
+            }
+        }
+
+        private static void ProcessAndPublishPdf(string kind, string fullPath)
+        {
+            string mode, fileName;
+            byte[] pdfBytes = Manager.OpenAndReadServerPdf(fullPath, out mode, out fileName);
+            string b64 = Convert.ToBase64String(pdfBytes);
+
+            lock (BridgeLock)
+            {
+                int nextSeq = (kind == "old") ? (++OldPayloadSeq) : (++NewPayloadSeq);
+                string payloadFile = Path.Combine(BridgeDir, kind == "old" ? "payload_old.js" : "payload_new.js");
+                string sb = "window.__PDF_DIFF_BRIDGE && window.__PDF_DIFF_BRIDGE.onPayload("
+                    + JsonQuote(kind) + ",{"
+                    + "\"seq\":" + nextSeq + ","
+                    + "\"file_name\":" + JsonQuote(fileName) + ","
+                    + "\"file_size\":" + pdfBytes.Length + ","
+                    + "\"workspace_mode\":" + JsonQuote(mode) + ","
+                    + "\"server_path\":" + JsonQuote(fullPath) + ","
+                    + "\"pdf_base64\":\"" + b64 + "\""
+                    + "});\r\n";
+
+                WriteFileAtomic(payloadFile, sb);
+                DebugLogger.Log("PUBLISH", string.Format("Published {0} payload (seq={1}, bytes={2}, mode={3})", kind, nextSeq, pdfBytes.Length, mode));
+            }
+            WriteBridgeStatus();
+        }
+
+        // 開いているエクスプローラーウィンドウや主要フォルダからドロップ元ファイルのフルパスを自動特定
+        private static string ResolveDroppedFilePath(string fileName, long expectedSize)
+        {
+            if (string.IsNullOrEmpty(fileName)) return null;
+            List<string> candidateDirs = new List<string>();
+
+            // 1. 現在開いているWindowsエクスプローラーのフォルダパスを取得
+            try
+            {
+                Type shellAppType = Type.GetTypeFromProgID("Shell.Application");
+                if (shellAppType != null)
+                {
+                    object shell = Activator.CreateInstance(shellAppType);
+                    object windows = shellAppType.InvokeMember("Windows", BindingFlags.InvokeMethod, null, shell, null);
+                    IEnumerable enumerable = windows as IEnumerable;
+                    if (enumerable != null)
+                    {
+                        foreach (object win in enumerable)
+                        {
+                            try
+                            {
+                                object locUrlObj = win.GetType().InvokeMember("LocationURL", BindingFlags.GetProperty, null, win, null);
+                                string locUrl = locUrlObj as string;
+                                if (!string.IsNullOrEmpty(locUrl))
+                                {
+                                    Uri u;
+                                    if (Uri.TryCreate(locUrl, UriKind.Absolute, out u) && u.IsFile)
+                                    {
+                                        string dirPath = u.LocalPath;
+                                        if (!string.IsNullOrEmpty(dirPath) && Directory.Exists(dirPath))
+                                        {
+                                            candidateDirs.Add(dirPath);
+                                            DebugLogger.Log("EXPLORER_DIR", "Detected open Explorer folder: " + dirPath);
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log("WARN", "Shell.Application Explorer query failed: " + ex.Message);
+            }
+
+            // 2. 直前に選択したフォルダ・実行フォルダ・デスクトップ・ダウンロード・ドキュメント
+            if (!string.IsNullOrEmpty(LastSelectedDir)) candidateDirs.Add(LastSelectedDir);
+            candidateDirs.Add(AppDomain.CurrentDomain.BaseDirectory);
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrEmpty(userProfile))
+            {
+                candidateDirs.Add(Path.Combine(userProfile, "Downloads"));
+                candidateDirs.Add(Path.Combine(userProfile, "Desktop"));
+                candidateDirs.Add(Path.Combine(userProfile, "Documents"));
+            }
+
+            // 完全一致（ファイル名＋サイズ）を優先検索
+            foreach (string dir in candidateDirs)
+            {
+                try
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    string candidate = Path.Combine(dir, fileName);
+                    if (File.Exists(candidate))
+                    {
+                        if (expectedSize <= 0 || new FileInfo(candidate).Length == expectedSize)
+                        {
+                            return candidate;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // サイズ条件なしでファイル名一致を再確認
+            foreach (string dir in candidateDirs)
+            {
+                try
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    string candidate = Path.Combine(dir, fileName);
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        private static void WriteBridgeStatus()
+        {
+            if (string.IsNullOrEmpty(BridgeDir)) return;
+            lock (BridgeLock)
+            {
+                try
+                {
+                    StatusSeq++;
+                    ProgressState p = Manager.LatestProgress;
+                    string pctStr = p.Percent.HasValue ? p.Percent.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "null";
+                    List<string> logs = DebugLogger.GetEntries();
+                    StringBuilder logJson = new StringBuilder("[");
+                    int start = Math.Max(0, logs.Count - 200);
+                    for (int i = start; i < logs.Count; i++)
+                    {
+                        if (i > start) logJson.Append(',');
+                        logJson.Append(JsonQuote(logs[i]));
+                    }
+                    logJson.Append("]");
+
+                    string js = "window.__PDF_DIFF_BRIDGE && window.__PDF_DIFF_BRIDGE.onStatus({"
+                        + "\"seq\":" + StatusSeq + ","
+                        + "\"busy\":" + (IsBusy ? "true" : "false") + ","
+                        + "\"ack_cmd\":" + JsonQuote(LastAckCmdId) + ","
+                        + "\"old_seq\":" + OldPayloadSeq + ","
+                        + "\"new_seq\":" + NewPayloadSeq + ","
+                        + "\"error_seq\":" + ErrorSeq + ","
+                        + "\"last_error\":" + JsonQuote(LastErrorMsg) + ","
+                        + "\"stage\":" + JsonQuote(p.Stage) + ","
+                        + "\"message\":" + JsonQuote(p.Message) + ","
+                        + "\"percent\":" + pctStr + ","
+                        + "\"dataclasys_available\":" + (Manager.IsDataClasysAvailable() ? "true" : "false") + ","
+                        + "\"clsu_client_path\":" + JsonQuote(Manager.ClsuClientPath) + ","
+                        + "\"workspace_root\":" + JsonQuote(Manager.GetAppRoot()) + ","
+                        + "\"log_file_path\":" + JsonQuote(DebugLogger.LogFilePath) + ","
+                        + "\"logs\":" + logJson.ToString()
+                        + "});\r\n";
+
+                    string statusFile = Path.Combine(BridgeDir, "status.js");
+                    WriteFileAtomic(statusFile, js);
+                }
+                catch { }
+            }
+        }
+
+        private static void WriteFileAtomic(string targetPath, string content)
+        {
+            string tmpPath = targetPath + ".tmp";
+            File.WriteAllText(tmpPath, content, Encoding.UTF8);
+            File.Copy(tmpPath, targetPath, true);
+            try { File.Delete(tmpPath); } catch { }
+        }
+
+        private static List<string> GetPdfDiffWindowTitles()
+        {
+            List<string> results = new List<string>();
+            try
+            {
+                EnumWindows((hWnd, lParam) =>
+                {
+                    int len = GetWindowTextLength(hWnd);
+                    if (len > 0 && len < 4096)
+                    {
+                        StringBuilder sb = new StringBuilder(len + 2);
+                        GetWindowText(hWnd, sb, sb.Capacity);
+                        string t = sb.ToString();
+                        if (t.IndexOf("PDF Diff Studio", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            t.IndexOf("PDFDiffStudio", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            results.Add(t);
+                        }
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+            return results;
+        }
+
+        private static void LaunchAppWindowFileMode(string htmlPath)
+        {
+            string fileUri = new Uri(htmlPath).AbsoluteUri;
             string[] edgeCandidates = new string[]
             {
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Microsoft\Edge\Application\msedge.exe"),
@@ -583,17 +1001,14 @@ namespace PDFDiffStudio
                 @"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
             };
 
-            string profileDir = Path.Combine(Manager.GetAppRoot(), "edge_app_profile");
-            try { Directory.CreateDirectory(profileDir); } catch { }
-
             foreach (string edge in edgeCandidates)
             {
                 if (File.Exists(edge))
                 {
                     try
                     {
-                        string edgeArgs = "--app=\"" + url + "\" --window-size=1500,940 --no-proxy-server --disable-extensions --user-data-dir=\"" + profileDir + "\"";
-                        DebugLogger.Log("LAUNCH", "Starting Edge: " + edge + " " + edgeArgs);
+                        string edgeArgs = "--app=\"" + fileUri + "\" --window-size=1500,940";
+                        DebugLogger.Log("LAUNCH", "Starting Edge in file:// mode (Zero-HTTP, bypasses i-FILTER): " + edge + " " + edgeArgs);
                         Process.Start(new ProcessStartInfo
                         {
                             FileName = edge,
@@ -611,10 +1026,10 @@ namespace PDFDiffStudio
 
             try
             {
-                DebugLogger.Log("LAUNCH", "Fallback Process.Start: " + url);
+                DebugLogger.Log("LAUNCH", "Fallback Process.Start: " + htmlPath);
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = url,
+                    FileName = htmlPath,
                     UseShellExecute = true
                 });
             }
@@ -624,15 +1039,8 @@ namespace PDFDiffStudio
             }
         }
 
-        private static byte[] LoadIndexHtmlBytes()
+        private static byte[] LoadEmbeddedHtmlBytes()
         {
-            string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-            string externalHtml = Path.Combine(exeDir, "index.html");
-            if (File.Exists(externalHtml))
-            {
-                return File.ReadAllBytes(externalHtml);
-            }
-
             Assembly asm = Assembly.GetExecutingAssembly();
             using (Stream s = asm.GetManifestResourceStream("index.html"))
             {
@@ -648,307 +1056,7 @@ namespace PDFDiffStudio
             return Encoding.UTF8.GetBytes("<h1>index.html not found</h1>");
         }
 
-        private static void ServerLoop()
-        {
-            while (Running)
-            {
-                try
-                {
-                    TcpClient client = Listener.AcceptTcpClient();
-                    ThreadPool.QueueUserWorkItem(HandleClient, client);
-                }
-                catch
-                {
-                    if (!Running) break;
-                }
-            }
-        }
-
-        private static void HandleClient(object state)
-        {
-            using (TcpClient client = (TcpClient)state)
-            using (NetworkStream ns = client.GetStream())
-            {
-                ns.ReadTimeout = 120000;
-                ns.WriteTimeout = 120000;
-                try
-                {
-                    string requestLine = ReadLineAscii(ns);
-                    if (string.IsNullOrEmpty(requestLine)) return;
-
-                    string[] parts = requestLine.Split(' ');
-                    if (parts.Length < 2) return;
-                    string method = parts[0].ToUpperInvariant();
-                    string rawTarget = parts[1];
-
-                    int contentLength = 0;
-                    while (true)
-                    {
-                        string headerLine = ReadLineAscii(ns);
-                        if (string.IsNullOrEmpty(headerLine)) break;
-                        int colon = headerLine.IndexOf(':');
-                        if (colon > 0)
-                        {
-                            string hName = headerLine.Substring(0, colon).Trim();
-                            string hVal = headerLine.Substring(colon + 1).Trim();
-                            if (hName.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
-                            {
-                                int.TryParse(hVal, out contentLength);
-                            }
-                        }
-                    }
-
-                    byte[] bodyBytes = new byte[contentLength];
-                    int readTotal = 0;
-                    while (readTotal < contentLength)
-                    {
-                        int n = ns.Read(bodyBytes, readTotal, contentLength - readTotal);
-                        if (n <= 0) break;
-                        readTotal += n;
-                    }
-
-                    string pathOnly = rawTarget;
-                    string query = "";
-                    int qIdx = rawTarget.IndexOf('?');
-                    if (qIdx >= 0)
-                    {
-                        pathOnly = rawTarget.Substring(0, qIdx);
-                        query = rawTarget.Substring(qIdx + 1);
-                    }
-
-                    LastHeartbeat = DateTime.UtcNow;
-
-                    if (pathOnly != "/api/heartbeat" && pathOnly != "/api/progress")
-                    {
-                        DebugLogger.Log("HTTP", method + " " + rawTarget + " (body=" + readTotal + " bytes)");
-                    }
-
-                    if (method == "GET" && (pathOnly == "/" || pathOnly == "/index.html"))
-                    {
-                        byte[] html = LoadIndexHtmlBytes();
-                        WriteResponse(ns, "200 OK", "text/html; charset=utf-8", html);
-                        return;
-                    }
-
-                    if (method == "GET" && pathOnly == "/api/status")
-                    {
-                        string json = "{"
-                            + "\"ok\":true,"
-                            + "\"server\":\"PDFDiffStudio.exe\","
-                            + "\"dataclasys_available\":" + (Manager.IsDataClasysAvailable() ? "true" : "false") + ","
-                            + "\"clsu_client_path\":" + JsonQuote(Manager.ClsuClientPath) + ","
-                            + "\"workspace_root\":" + JsonQuote(Manager.GetAppRoot()) + ","
-                            + "\"log_file_path\":" + JsonQuote(DebugLogger.LogFilePath) + ","
-                            + "\"app_id\":" + JsonQuote(Manager.AppId)
-                            + "}";
-                        WriteJson(ns, "200 OK", json);
-                        return;
-                    }
-
-                    if (method == "GET" && pathOnly == "/api/logs")
-                    {
-                        List<string> logs = DebugLogger.GetEntries();
-                        StringBuilder sb = new StringBuilder();
-                        sb.Append("{\"ok\":true,\"log_file_path\":").Append(JsonQuote(DebugLogger.LogFilePath)).Append(",\"logs\":[");
-                        for (int i = 0; i < logs.Count; i++)
-                        {
-                            if (i > 0) sb.Append(',');
-                            sb.Append(JsonQuote(logs[i]));
-                        }
-                        sb.Append("]}");
-                        WriteJson(ns, "200 OK", sb.ToString());
-                        return;
-                    }
-
-                    if (method == "POST" && pathOnly == "/api/logs/clear")
-                    {
-                        DebugLogger.Clear();
-                        WriteJson(ns, "200 OK", "{\"ok\":true}");
-                        return;
-                    }
-
-                    if (method == "GET" && pathOnly == "/api/progress")
-                    {
-                        ProgressState p = Manager.LatestProgress;
-                        string pctStr = p.Percent.HasValue ? p.Percent.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) : "null";
-                        string json = "{"
-                            + "\"stage\":" + JsonQuote(p.Stage) + ","
-                            + "\"message\":" + JsonQuote(p.Message) + ","
-                            + "\"percent\":" + pctStr + ","
-                            + "\"timestamp\":" + JsonQuote(p.Timestamp) + ","
-                            + "\"server_path\":" + JsonQuote(p.ServerPath) + ","
-                            + "\"local_path\":" + JsonQuote(p.LocalPath)
-                            + "}";
-                        WriteJson(ns, "200 OK", json);
-                        return;
-                    }
-
-                    if (method == "POST" && pathOnly == "/api/heartbeat")
-                    {
-                        WriteJson(ns, "200 OK", "{\"ok\":true}");
-                        return;
-                    }
-
-                    if (method == "POST" && pathOnly == "/api/shutdown")
-                    {
-                        WriteJson(ns, "200 OK", "{\"ok\":true}");
-                        Running = false;
-                        return;
-                    }
-
-                    if (method == "POST" && pathOnly == "/api/select-file")
-                    {
-                        string kind = GetQueryParam(query, "kind") ?? "old";
-                        string title = kind == "old" ? "旧版PDFファイルを選択" : "新版PDFファイルを選択";
-                        string selectedPath = ShowOpenFileDialogSta(title);
-                        if (string.IsNullOrEmpty(selectedPath))
-                        {
-                            DebugLogger.Log("DIALOG", "File selection cancelled by user (kind=" + kind + ")");
-                            WriteJson(ns, "200 OK", "{\"cancelled\":true}");
-                            return;
-                        }
-                        DebugLogger.Log("DIALOG", "Selected file (kind=" + kind + "): " + selectedPath);
-                        try
-                        {
-                            string mode, fileName;
-                            byte[] pdfBytes = Manager.OpenAndReadServerPdf(selectedPath, out mode, out fileName);
-                            string b64 = Convert.ToBase64String(pdfBytes);
-                            string json = "{"
-                                + "\"file_name\":" + JsonQuote(fileName) + ","
-                                + "\"file_size\":" + pdfBytes.Length + ","
-                                + "\"workspace_mode\":" + JsonQuote(mode) + ","
-                                + "\"server_path\":" + JsonQuote(selectedPath) + ","
-                                + "\"pdf_base64\":\"" + b64 + "\""
-                                + "}";
-                            WriteJson(ns, "200 OK", json);
-                        }
-                        catch (Exception ex)
-                        {
-                            DebugLogger.Log("EXCEPTION", "select-file error: " + ex.ToString());
-                            WriteErrorJson(ns, ex);
-                        }
-                        return;
-                    }
-
-                    if (method == "POST" && pathOnly == "/api/open-path")
-                    {
-                        string bodyStr = Encoding.UTF8.GetString(bodyBytes, 0, readTotal);
-                        string inputPath = ExtractJsonStringField(bodyStr, "path");
-                        if (string.IsNullOrEmpty(inputPath))
-                        {
-                            WriteJson(ns, "400 Bad Request", "{\"error\":\"ファイルパスが空です\"}");
-                            return;
-                        }
-                        inputPath = inputPath.Trim().Trim('"');
-                        DebugLogger.Log("OPEN_PATH", "Requested path: " + inputPath);
-                        try
-                        {
-                            string mode, fileName;
-                            byte[] pdfBytes = Manager.OpenAndReadServerPdf(inputPath, out mode, out fileName);
-                            string b64 = Convert.ToBase64String(pdfBytes);
-                            string json = "{"
-                                + "\"file_name\":" + JsonQuote(fileName) + ","
-                                + "\"file_size\":" + pdfBytes.Length + ","
-                                + "\"workspace_mode\":" + JsonQuote(mode) + ","
-                                + "\"server_path\":" + JsonQuote(inputPath) + ","
-                                + "\"pdf_base64\":\"" + b64 + "\""
-                                + "}";
-                            WriteJson(ns, "200 OK", json);
-                        }
-                        catch (Exception ex)
-                        {
-                            DebugLogger.Log("EXCEPTION", "open-path error: " + ex.ToString());
-                            WriteErrorJson(ns, ex);
-                        }
-                        return;
-                    }
-
-                    if (method == "POST" && pathOnly == "/api/decrypt-dropped")
-                    {
-                        string name = GetQueryParam(query, "name") ?? "dropped.pdf";
-                        byte[] rawFileBytes = bodyBytes;
-
-                        // JSON形式 ({ "name": "...", "data_base64": "..." }) で送られた場合にも対応
-                        if (readTotal > 0 && bodyBytes[0] == (byte)'{')
-                        {
-                            string bodyStr = Encoding.UTF8.GetString(bodyBytes, 0, readTotal);
-                            string jsonName = ExtractJsonStringField(bodyStr, "name");
-                            if (!string.IsNullOrEmpty(jsonName)) name = jsonName;
-                            string b64Data = ExtractJsonStringField(bodyStr, "data_base64");
-                            if (!string.IsNullOrEmpty(b64Data))
-                            {
-                                rawFileBytes = Convert.FromBase64String(b64Data);
-                            }
-                        }
-
-                        string safeName = Path.GetFileName(name);
-                        if (string.IsNullOrEmpty(safeName)) safeName = "dropped.pdf";
-                        if (!safeName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)) safeName += ".pdf";
-
-                        DebugLogger.Log("DROP", "Received dropped file: name=" + safeName + ", bytes=" + rawFileBytes.Length);
-
-                        string tempDir = Path.Combine(Manager.GetAppRoot(), "dropped_" + Guid.NewGuid().ToString("N").Substring(0, 8));
-                        Directory.CreateDirectory(tempDir);
-                        string tempFile = Path.Combine(tempDir, safeName);
-                        try
-                        {
-                            File.WriteAllBytes(tempFile, rawFileBytes);
-                            string mode, outName;
-                            byte[] pdfBytes = Manager.OpenAndReadServerPdf(tempFile, out mode, out outName);
-                            string b64 = Convert.ToBase64String(pdfBytes);
-                            string json = "{"
-                                + "\"file_name\":" + JsonQuote(safeName) + ","
-                                + "\"file_size\":" + pdfBytes.Length + ","
-                                + "\"workspace_mode\":" + JsonQuote(mode) + ","
-                                + "\"server_path\":" + JsonQuote(safeName) + ","
-                                + "\"pdf_base64\":\"" + b64 + "\""
-                                + "}";
-                            WriteJson(ns, "200 OK", json);
-                        }
-                        catch (Exception ex)
-                        {
-                            DebugLogger.Log("EXCEPTION", "decrypt-dropped error: " + ex.ToString());
-                            WriteErrorJson(ns, ex);
-                        }
-                        finally
-                        {
-                            try { Directory.Delete(tempDir, true); } catch { }
-                        }
-                        return;
-                    }
-
-                    DebugLogger.Log("WARN", "404 Not Found: " + method + " " + pathOnly);
-                    WriteJson(ns, "404 Not Found", "{\"error\":\"Endpoint not found: " + pathOnly + "\"}");
-                }
-                catch (Exception outerEx)
-                {
-                    DebugLogger.Log("HTTP_ERR", "HandleClient exception: " + outerEx.ToString());
-                }
-            }
-        }
-
-        private static void WriteErrorJson(NetworkStream ns, Exception ex)
-        {
-            List<string> recentLogs = DebugLogger.GetEntries();
-            StringBuilder logArr = new StringBuilder("[");
-            int start = Math.Max(0, recentLogs.Count - 30);
-            for (int i = start; i < recentLogs.Count; i++)
-            {
-                if (i > start) logArr.Append(',');
-                logArr.Append(JsonQuote(recentLogs[i]));
-            }
-            logArr.Append("]");
-
-            string json = "{"
-                + "\"error\":" + JsonQuote(ex.Message) + ","
-                + "\"detail\":" + JsonQuote(ex.ToString()) + ","
-                + "\"log_file_path\":" + JsonQuote(DebugLogger.LogFilePath) + ","
-                + "\"recent_logs\":" + logArr.ToString()
-                + "}";
-            WriteJson(ns, "400 Bad Request", json);
-        }
-
-        private static string ShowOpenFileDialogSta(string title)
+        private static string ShowOpenFileDialogSta(string title, string initialFileName)
         {
             string selected = null;
             Thread sta = new Thread(() =>
@@ -970,6 +1078,14 @@ namespace PDFDiffStudio
                         ofd.Filter = "PDFファイル (*.pdf)|*.pdf|すべてのファイル (*.*)|*.*";
                         ofd.RestoreDirectory = true;
                         ofd.DereferenceLinks = false;
+                        if (!string.IsNullOrEmpty(LastSelectedDir) && Directory.Exists(LastSelectedDir))
+                        {
+                            ofd.InitialDirectory = LastSelectedDir;
+                        }
+                        if (!string.IsNullOrEmpty(initialFileName))
+                        {
+                            ofd.FileName = initialFileName;
+                        }
                         if (ofd.ShowDialog(topForm) == DialogResult.OK)
                         {
                             selected = ofd.FileName;
@@ -981,94 +1097,6 @@ namespace PDFDiffStudio
             sta.Start();
             sta.Join();
             return selected;
-        }
-
-        private static string ReadLineAscii(NetworkStream ns)
-        {
-            List<byte> bytes = new List<byte>();
-            while (true)
-            {
-                int b = ns.ReadByte();
-                if (b < 0)
-                {
-                    if (bytes.Count == 0) return null;
-                    break;
-                }
-                if (b == '\n') break;
-                if (b != '\r') bytes.Add((byte)b);
-            }
-            return Encoding.ASCII.GetString(bytes.ToArray());
-        }
-
-        private static void WriteJson(NetworkStream ns, string status, string json)
-        {
-            WriteResponse(ns, status, "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json));
-        }
-
-        private static void WriteResponse(NetworkStream ns, string status, string contentType, byte[] body)
-        {
-            string header = "HTTP/1.1 " + status + "\r\n"
-                + "Content-Type: " + contentType + "\r\n"
-                + "Content-Length: " + body.Length + "\r\n"
-                + "Cache-Control: no-store\r\n"
-                + "Connection: close\r\n\r\n";
-            byte[] hBytes = Encoding.ASCII.GetBytes(header);
-            ns.Write(hBytes, 0, hBytes.Length);
-            ns.Write(body, 0, body.Length);
-            ns.Flush();
-        }
-
-        private static string GetQueryParam(string query, string key)
-        {
-            if (string.IsNullOrEmpty(query)) return null;
-            string[] pairs = query.Split('&');
-            foreach (string pair in pairs)
-            {
-                int eq = pair.IndexOf('=');
-                if (eq > 0)
-                {
-                    string k = Uri.UnescapeDataString(pair.Substring(0, eq));
-                    if (k == key)
-                    {
-                        return Uri.UnescapeDataString(pair.Substring(eq + 1));
-                    }
-                }
-            }
-            return null;
-        }
-
-        private static string ExtractJsonStringField(string json, string field)
-        {
-            string pattern = "\"" + field + "\"";
-            int idx = json.IndexOf(pattern, StringComparison.OrdinalIgnoreCase);
-            if (idx < 0) return "";
-            int colon = json.IndexOf(':', idx + pattern.Length);
-            if (colon < 0) return "";
-            int q1 = json.IndexOf('"', colon + 1);
-            if (q1 < 0) return "";
-            StringBuilder sb = new StringBuilder();
-            for (int i = q1 + 1; i < json.Length; i++)
-            {
-                char c = json[i];
-                if (c == '\\' && i + 1 < json.Length)
-                {
-                    char next = json[++i];
-                    if (next == '"' || next == '\\' || next == '/') sb.Append(next);
-                    else if (next == 'n') sb.Append('\n');
-                    else if (next == 'r') sb.Append('\r');
-                    else if (next == 't') sb.Append('\t');
-                    else sb.Append(next);
-                }
-                else if (c == '"')
-                {
-                    break;
-                }
-                else
-                {
-                    sb.Append(c);
-                }
-            }
-            return sb.ToString();
         }
 
         private static string JsonQuote(string s)
